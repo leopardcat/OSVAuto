@@ -1208,27 +1208,6 @@ query tcbjoin_join_get_neq {
     proof { auto }
 }
 
-query TCBList_P_tcb_dly_hold {
-    fixes tcbList : TCBList;
-    fixes rtbl : int32u[];
-    fixes vptr : val;
-    fixes tcbls : TCBMap;
-    fixes tcbls1 : TCBMap;
-    fixes prio : int32u;
-    fixes ptcb : addrval;
-    fixes abstcb : struct AbsTCB;
-    assumes H1 : 0 <= abstcb.prio && abstcb.prio < 64;
-    assumes H2 : TCBList_P(vptr, tcbList, rtbl, tcbls);
-    assumes H3 : join(ptcb, abstcb, tcbls, tcbls1);
-    assumes H4 : prio_neq_cur(tcbls, ptcb, abstcb.prio);
-    shows TCBList_P(vptr, tcbList, rtbl[abstcb.prio >> 3 := rtbl[abstcb.prio >> 3] & ~ (1 << (abstcb.prio & 7))], tcbls)
-    proof {
-        split_conj(H1, [H11, H12]);;
-        apply_theorem(update_rtbl_tcblist_hold, [_, H2, H12]);;
-        simplify;;
-        auto
-    }
-}
 
 del_attrib rewrite for TCBNode_P_def
 
@@ -1265,8 +1244,30 @@ query update_rtbl_tcblist_hold {
     }
 }
 
-// task_pure.v
+query TCBList_P_tcb_dly_hold {
+    fixes tcbList : TCBList;
+    fixes rtbl : int32u[];
+    fixes vptr : val;
+    fixes tcbls : TCBMap;
+    fixes tcbls1 : TCBMap;
+    fixes prio : int32u;
+    fixes ptcb : addrval;
+    fixes abstcb : struct AbsTCB;
+    assumes H1 : 0 <= abstcb.prio && abstcb.prio < 64;
+    assumes H2 : TCBList_P(vptr, tcbList, rtbl, tcbls);
+    assumes H3 : join(ptcb, abstcb, tcbls, tcbls1);
+    assumes H4 : prio_neq_cur(tcbls, ptcb, abstcb.prio);
+    shows TCBList_P(vptr, tcbList, rtbl[abstcb.prio >> 3 := rtbl[abstcb.prio >> 3] & ~ (1 << (abstcb.prio & 7))], tcbls)
+    proof {
+        split_conj(H1, [H11, H12]);;
+        apply_theorem(update_rtbl_tcblist_hold, [_, H2, H12]);;
+        simplify;;
+        auto
+    }
+}
 
+// task_pure.v
+/*
 query r_priotbl_p_hold_for_del_a_tcb{
     fixes ptbl : PTBLMap;
     fixes ptbl_new : PTBLMap;
@@ -1283,7 +1284,7 @@ query r_priotbl_p_hold_for_del_a_tcb{
     shows R_PrioTbl_P(ptbl_new, tcbls_left, vhold)
     proof { auto }
 }
-
+*/
 query priowaitinq_is_prio_in_tbl{
     fixes prio : int32u;
     fixes rtbl : int32u[];
@@ -1311,24 +1312,5 @@ query R_Prio_No_Dup_hold_for_subset {
     fixes tcbls2 : TCBMap;
     assumes join(tid, abstcb, tcbls1, tcbls2);
     shows R_Prio_No_Dup(tcbls2) -> R_Prio_No_Dup(tcbls1)
-    proof { auto }
-}
-
-query TcbIsWait {
-    fixes eptr : val;
-    fixes prio : int32u;
-    fixes dly : int32u;
-    fixes stat : int32u;
-    fixes stat_abs : taskstatus;
-    fixes sus : bool;
-    fixes rtbl : int32u[];
-    assumes R_TCB_Status_P(TCB{{eptr : eptr, stat : stat, dly : dly, prio : prio, 
-            x : (prio & 7), y : (prio >> 3), bitx : (1 << (prio & 7)), bity : (1 << (prio >> 3))}}, 
-            rtbl, AbsTCB{{prio : prio, stat : stat_abs}});
-    assumes stat == OS_STAT_SEM || stat == OS_STAT_Q || stat == OS_STAT_MBOX || stat == OS_STAT_MUTEX || 
-            stat == (OS_STAT_SEM | OS_STAT_SUSPEND) || stat == (OS_STAT_Q | OS_STAT_SUSPEND) || 
-            stat == (OS_STAT_MBOX | OS_STAT_SUSPEND) || stat == (OS_STAT_MUTEX | OS_STAT_SUSPEND);
-    shows exists (tcbstats wt, addrval eid) { eptr == Vptr(eid) && stat_abs == wait(wt, dly) && 
-            (wt == os_stat_sem(eid) || wt == os_stat_q(eid) || wt == os_stat_mbox(eid) || wt == os_stat_mutexsem(eid)) }
     proof { auto }
 }

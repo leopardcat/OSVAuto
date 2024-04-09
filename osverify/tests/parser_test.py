@@ -27,7 +27,7 @@ class OSParserTest(unittest.TestCase):
         os_parser.load_theory("testBit", verbose=True, check_proof=True)
 
     def testUcos(self):
-        os_parser.load_theory("ucos", verbose=True, check_proof="TcbIsWait")
+        os_parser.load_theory("ucos", verbose=True, check_proof=True)
 
 
 if __name__ == "__main__":
