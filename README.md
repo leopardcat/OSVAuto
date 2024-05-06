@@ -5,6 +5,7 @@ semi-automatic verifier for functional specifications of operating systems
 In any environment with python and pip, use pip to install Lark: 
 
 ```
+$ pip3 install z3-solver
 $ pip3 install Lark
 ```
 
