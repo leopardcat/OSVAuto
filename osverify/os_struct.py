@@ -166,7 +166,7 @@ class OSStructType(OSType):
         return isinstance(other, OSStructType) and self.name == other.name
 
     def __str__(self):
-        return "struct " + self.name
+        return self.name
     
     def __repr__(self):
         return "OSStructType(%s)" % self.name
@@ -220,6 +220,8 @@ class OSHLevelType(OSType):
     def __init__(self, name: str, *params: OSType):
         self.name = name
         self.params = tuple(params)
+        assert all(isinstance(param, OSType) for param in self.params), \
+            "OSHLevelType: each parameter must be OSType"
 
     def __eq__(self, other):
         return isinstance(other, OSHLevelType) and self.name == other.name and \
@@ -299,18 +301,18 @@ class OSFunctionType(OSType):
     def __init__(self, *types: OSType):
         self.arg_types = tuple(types[:-1])
         self.ret_type = types[-1]
-        assert len(self.arg_types) > 0 and \
-            any(isinstance(type, OSType) for type in self.arg_types) and isinstance(self.ret_type, OSType)
+        assert len(self.arg_types) > 0, "OSFunctionType: must have at least one argument"
+        assert all(isinstance(type, OSType) for type in self.arg_types), \
+            "OSFunctionType: arguments must be OSType"
+        assert isinstance(self.ret_type, OSType), \
+            "OSFunctionType: arguments must be OSType"
 
     def __eq__(self, other):
         return isinstance(other, OSFunctionType) and self.arg_types == other.arg_types and \
             self.ret_type == other.ret_type
 
     def __str__(self):
-        if len(self.arg_types) == 1:
-            return "%s => %s" % (self.arg_types[0], self.ret_type)
-        else:
-            return "(%s) => %s" % (', '.join(str(arg_type) for arg_type in self.arg_types), self.ret_type)
+        return "%s -> %s" % (' -> '.join(str(arg_type) for arg_type in self.arg_types), self.ret_type)
 
     def __repr__(self):
         return "OSFunctionType(%s)" % ", ".join(repr(ty) for ty in self.arg_types + (self.ret_type,))
@@ -326,7 +328,7 @@ class OSFunctionType(OSType):
             return False
         if len(self.arg_types) != len(other.arg_types):
             return False
-        for i in range(self.arg_types):
+        for i in range(len(self.arg_types)):
             if not self.arg_types[i].match(other.arg_types[i], tyinst):
                 return False
         return self.ret_type.match(other.ret_type, tyinst)
@@ -445,12 +447,15 @@ class AxiomDef:
     ----------
     func_name : str
         name of the function
+    type_params : Tuple[str]
+        ordered list of type parameters
     type : OSType
         type of the function
 
     """
-    def __init__(self, func_name: str, type: OSType):
+    def __init__(self, func_name: str, type_params: Iterable[str], type: OSType):
         self.func_name = func_name
+        self.type_params = tuple(type_params)
         self.type = type
 
     def __str__(self):

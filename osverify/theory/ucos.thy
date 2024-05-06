@@ -1,7 +1,7 @@
 imports basic
 imports ucosData
 
-predicate RL_TCBblk_P (struct TCB tcb) {
+predicate RL_TCBblk_P (TCB tcb) {
     0 <= tcb.prio && tcb.prio < 64 &&
     tcb.prio & 7 == tcb.x &&
     tcb.prio >> 3 == tcb.y &&
@@ -14,7 +14,7 @@ predicate RL_TCBblk_P (struct TCB tcb) {
         tcb.stat == OS_STAT_Q | OS_STAT_SUSPEND ||
         tcb.stat == OS_STAT_MBOX | OS_STAT_SUSPEND ||
         tcb.stat == OS_STAT_MUTEX | OS_STAT_SUSPEND) &&
-    (tcb.stat == OS_STAT_RDY || tcb.stat == OS_STAT_SUSPEND) -> tcb.eptr == Vnull 
+    ((tcb.stat == OS_STAT_RDY || tcb.stat == OS_STAT_SUSPEND) -> tcb.eptr == Vnull)
 }
 
 predicate prio_in_tbl(int32u prio, int32u[] rtbl) {
@@ -34,13 +34,13 @@ predicate prio_not_in_tbl(int32u prio, int32u[] rtbl) {
 
 // Refinement relation: rdy case
 
-predicate RLH_RdyI_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abstcb) {
+predicate RLH_RdyI_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
     prio_in_tbl(tcb.prio, rtbl) ->
     tcb.stat == OS_STAT_RDY && tcb.dly == 0 &&
     abstcb.prio == tcb.prio && abstcb.stat == rdy && abstcb.sus == false
 }
 
-predicate RHL_RdyI_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abstcb) {
+predicate RHL_RdyI_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
     abstcb.stat == rdy && abstcb.sus == false ->
     prio_in_tbl(tcb.prio, rtbl) && tcb.prio == abstcb.prio &&
     tcb.stat == OS_STAT_RDY && tcb.dly == 0
@@ -48,20 +48,24 @@ predicate RHL_RdyI_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abstcb) {
 
 // Refinement relation: wait case
 
-predicate RLH_Wait_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abstcb) {
+predicate RLH_Wait_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
     prio_not_in_tbl(tcb.prio, rtbl) -> tcb.stat == OS_STAT_RDY ->
     tcb.dly > 0 && abstcb.prio == tcb.prio &&
     abstcb.stat == wait(os_stat_time, tcb.dly) && abstcb.sus == false
 }
 
-predicate RHL_Wait_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abstcb) {
-    abstcb.stat == wait(os_stat_time, tcb.dly) -> abstcb.sus == false ->
-    prio_not_in_tbl(tcb.prio, rtbl) && tcb.dly > 0 && tcb.stat == OS_STAT_RDY
+predicate RHL_Wait_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
+    switch (abstcb) {
+        case AbsTCB{{prio: prio, stat: wait(os_stat_time, d), sus: false}}:
+            prio == tcb.prio && prio_not_in_tbl(prio, rtbl) &&
+            d == tcb.dly && d > 0 && tcb.stat == OS_STAT_RDY;
+        default: true;
+    }
 }
 
 // Refinement relation: suspend case
 
-predicate RLH_Suspend_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abstcb) {
+predicate RLH_Suspend_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
     (
         prio_not_in_tbl(tcb.prio, rtbl) -> tcb.dly == 0 -> tcb.stat == OS_STAT_SUSPEND ->
         abstcb.prio == tcb.prio && abstcb.stat == rdy && abstcb.sus == true
@@ -73,21 +77,25 @@ predicate RLH_Suspend_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abstcb) {
     )
 }
 
-predicate RHL_Suspend_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abstcb) {
+predicate RHL_Suspend_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
     (
         abstcb.stat == rdy -> abstcb.sus == true ->
         prio_not_in_tbl(tcb.prio, rtbl) && tcb.prio == abstcb.prio && tcb.dly == 0 && tcb.stat == OS_STAT_SUSPEND
     )
     &&
     (
-        abstcb.stat == wait(os_stat_time, tcb.dly) && abstcb.sus == true ->
-        prio_not_in_tbl(tcb.prio, rtbl) && tcb.dly > 0 && tcb.stat == OS_STAT_SUSPEND
+        switch (abstcb) {
+            case AbsTCB{{prio: prio, stat: wait(os_stat_time, d), sus: true}}:
+                prio == tcb.prio && prio_not_in_tbl(prio, rtbl) &&
+                d == tcb.dly && d > 0 && tcb.stat == OS_STAT_SUSPEND;
+            default: true;
+        }
     )
 }
 
 // Refinement relation: wait for semaphore
 
-predicate RLH_WaitS_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abstcb) {
+predicate RLH_WaitS_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
     prio_not_in_tbl(tcb.prio, rtbl) -> tcb.stat == OS_STAT_SEM ->
     switch (tcb.eptr) {
         case Vptr(eid):
@@ -97,7 +105,7 @@ predicate RLH_WaitS_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abstcb) {
     }
 }
 
-predicate RHL_WaitS_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abstcb) {
+predicate RHL_WaitS_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
     switch (abstcb) {
         case AbsTCB{{prio: prio, stat: wait(os_stat_sem(eid), dly), sus: false}}:
             tcb.prio == prio && prio_not_in_tbl(prio, rtbl) &&
@@ -108,7 +116,7 @@ predicate RHL_WaitS_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abstcb) {
 
 // Refinement relation: wait for semaphore and suspend
 
-predicate RLH_WaitS_Suspend_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abstcb) {
+predicate RLH_WaitS_Suspend_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
     prio_not_in_tbl(tcb.prio, rtbl) -> tcb.stat == OS_STAT_SEM | OS_STAT_SUSPEND ->
     switch (tcb.eptr) {
         case Vptr(eid):
@@ -118,7 +126,7 @@ predicate RLH_WaitS_Suspend_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abstc
     }
 }
 
-predicate RHL_WaitS_Suspend_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abstcb) {
+predicate RHL_WaitS_Suspend_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
     switch (abstcb) {
         case AbsTCB{{prio: prio, stat: wait(os_stat_sem(eid), dly), sus: true}}:
             tcb.prio == prio && prio_not_in_tbl(prio, rtbl) &&
@@ -129,7 +137,7 @@ predicate RHL_WaitS_Suspend_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abstc
 
 // Refinement relation: wait for queue
 
-predicate RLH_WaitQ_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abstcb) {
+predicate RLH_WaitQ_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
     prio_not_in_tbl(tcb.prio, rtbl) -> tcb.stat == OS_STAT_Q ->
     switch (tcb.eptr) {
         case Vptr(eid):
@@ -139,7 +147,7 @@ predicate RLH_WaitQ_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abstcb) {
     }
 }
 
-predicate RHL_WaitQ_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abstcb) {
+predicate RHL_WaitQ_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
     switch (abstcb) {
         case AbsTCB{{prio: prio, stat: wait(os_stat_q(eid), dly), sus: false}}:
             tcb.prio == prio && prio_not_in_tbl(prio, rtbl) && 
@@ -150,7 +158,7 @@ predicate RHL_WaitQ_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abstcb) {
 
 // Refinement relation: wait for queue and suspend
 
-predicate RLH_WaitQ_Suspend_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abstcb) {
+predicate RLH_WaitQ_Suspend_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
     prio_not_in_tbl(tcb.prio, rtbl) -> tcb.stat == OS_STAT_Q | OS_STAT_SUSPEND ->
     switch (tcb.eptr) {
         case Vptr(eid):
@@ -160,7 +168,7 @@ predicate RLH_WaitQ_Suspend_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abstc
     }
 }
 
-predicate RHL_WaitQ_Suspend_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abstcb) {
+predicate RHL_WaitQ_Suspend_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
     switch (abstcb) {
         case AbsTCB{{prio: prio, stat: wait(os_stat_q(eid), dly), sus: true}}:
             tcb.prio == prio && prio_not_in_tbl(prio, rtbl) &&
@@ -171,7 +179,7 @@ predicate RHL_WaitQ_Suspend_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abstc
 
 // Refinement relation: wait for mailbox
 
-predicate RLH_WaitMB_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abstcb) {
+predicate RLH_WaitMB_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
     prio_not_in_tbl(tcb.prio, rtbl) -> tcb.stat == OS_STAT_MBOX ->
     switch (tcb.eptr) {
         case Vptr(eid):
@@ -181,7 +189,7 @@ predicate RLH_WaitMB_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abstcb) {
     }
 }
 
-predicate RHL_WaitMB_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abstcb) {
+predicate RHL_WaitMB_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
     switch (abstcb) {
         case AbsTCB{{prio: prio, stat: wait(os_stat_mbox(eid), dly), sus: false}}:
             tcb.prio == prio && prio_not_in_tbl(prio, rtbl) &&
@@ -192,7 +200,7 @@ predicate RHL_WaitMB_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abstcb) {
 
 // Refinement relation: wait for mailbox and suspend
 
-predicate RLH_WaitMB_Suspend_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abstcb) {
+predicate RLH_WaitMB_Suspend_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
     prio_not_in_tbl(tcb.prio, rtbl) -> tcb.stat == OS_STAT_MBOX | OS_STAT_SUSPEND ->
     switch (tcb.eptr) {
         case Vptr(eid):
@@ -202,7 +210,7 @@ predicate RLH_WaitMB_Suspend_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abst
     }
 }
 
-predicate RHL_WaitMB_Suspend_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abstcb) {
+predicate RHL_WaitMB_Suspend_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
     switch (abstcb) {
         case AbsTCB{{prio: prio, stat: wait(os_stat_mbox(eid), dly), sus: true}}:
             tcb.prio == prio && prio_not_in_tbl(prio, rtbl) &&
@@ -213,7 +221,7 @@ predicate RHL_WaitMB_Suspend_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abst
 
 // Refinement relation: wait for mutex
 
-predicate RLH_WaitMS_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abstcb) {
+predicate RLH_WaitMS_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
     prio_not_in_tbl(tcb.prio, rtbl) -> tcb.stat == OS_STAT_MUTEX ->
     switch (tcb.eptr) {
         case Vptr(eid):
@@ -223,7 +231,7 @@ predicate RLH_WaitMS_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abstcb) {
     }
 }
 
-predicate RHL_WaitMS_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abstcb) {
+predicate RHL_WaitMS_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
     switch (abstcb) {
         case AbsTCB{{prio: prio, stat: wait(os_stat_mutexsem(eid), dly), sus: false}}:
             tcb.prio == prio && prio_not_in_tbl(prio, rtbl) &&
@@ -234,7 +242,7 @@ predicate RHL_WaitMS_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abstcb) {
 
 // Refinement relation: wait for mutex and suspend
 
-predicate RLH_WaitMS_Suspend_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abstcb) {
+predicate RLH_WaitMS_Suspend_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
     prio_not_in_tbl(tcb.prio, rtbl) -> tcb.stat == OS_STAT_MUTEX | OS_STAT_SUSPEND ->
     switch (tcb.eptr) {
         case Vptr(eid):
@@ -244,7 +252,7 @@ predicate RLH_WaitMS_Suspend_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abst
     }
 }
 
-predicate RHL_WaitMS_Suspend_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abstcb) {
+predicate RHL_WaitMS_Suspend_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
     switch (abstcb) {
         case AbsTCB{{prio: prio, stat: wait(os_stat_mutexsem(eid), dly), sus: true}}:
             tcb.prio == prio && prio_not_in_tbl(prio, rtbl) &&
@@ -255,7 +263,7 @@ predicate RHL_WaitMS_Suspend_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abst
 
 // Collection of all low-to-high relations: wait for event
 
-predicate RLH_TCB_Status_Wait_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abstcb) {
+predicate RLH_TCB_Status_Wait_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
     RLH_Wait_P(tcb, rtbl, abstcb) &&
     RLH_WaitS_P(tcb, rtbl, abstcb) &&
     RLH_WaitQ_P(tcb, rtbl, abstcb) &&
@@ -269,7 +277,7 @@ predicate RLH_TCB_Status_Wait_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abs
 
 // Collection of all high-to-low relations: wait for event
 
-predicate RHL_TCB_Status_Wait_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abstcb) {
+predicate RHL_TCB_Status_Wait_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
     RHL_Wait_P(tcb, rtbl, abstcb) &&
     RHL_WaitS_P(tcb, rtbl, abstcb) &&
     RHL_WaitQ_P(tcb, rtbl, abstcb) &&
@@ -283,7 +291,7 @@ predicate RHL_TCB_Status_Wait_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abs
 
 // All refinement relations for task information
 
-predicate R_TCB_Status_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abstcb) {
+predicate R_TCB_Status_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
     RLH_RdyI_P(tcb, rtbl, abstcb) &&
     RHL_RdyI_P(tcb, rtbl, abstcb) &&
     RLH_Suspend_P(tcb, rtbl, abstcb) &&
@@ -292,184 +300,259 @@ predicate R_TCB_Status_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abstcb) {
     RHL_TCB_Status_Wait_P(tcb, rtbl, abstcb)
 }
 
-/* We now write down the refinement relations between high- and
- *  low-level event information.
+/*
+ * We now write down the refinement relations between high- and
+ * low-level event information.
  */
 
- predicate PrioWaitInQ(int32u prio, int32u[] etbl){
+/*
+ * Same as prio_in_tbl?
+ */
+predicate PrioWaitInQ(int32u prio, int32u[] etbl) {
     let x = prio & 7 in 
         let y = prio >> 3 in 
             etbl[y] & (1 << x) == 1 << x
         end
     end
- }
+}
 
-// Q case
-predicate RLH_ECB_ETbl_Q_P(addrval eid, EventCtr ecb, TCBMap tcbls){
-    switch (ecb) {
-        case EventCtr{{osevent : osevent, etbl : etbl}}:
-            forall (int32u prio) {
-                PrioWaitInQ(prio, etbl) ->
-                osevent.OSEventType == OS_EVENT_TYPE_Q ->
-                exists (addrval tid, int32u time) {
-                    indom(tid, tcbls) && get(tid, tcbls).prio == prio &&
-                    get(tid, tcbls).stat == wait(os_stat_q(eid), time)
-                }
-            };
-        default: true;
+/*
+ * Low-to-high relation, queue case.
+ *
+ * For each event control block of queue type, for each priority in
+ * the priority table of the event, the priority exists in tcbls, and
+ * the corresponding task has status of waiting for the same event.
+ */
+predicate RLH_ECB_ETbl_Q_P(addrval eid, EventCtr ecb, TCBMap tcbls) {
+    forall (int32u prio in range(0, 64)) {
+        PrioWaitInQ(prio, ecb.etbl) ->
+        ecb.OSEventType == OS_EVENT_TYPE_Q ->
+        exists (addrval tid in tcbls) {
+            get(tid, tcbls).prio == prio &&
+            switch (get(tid, tcbls).stat) {
+                case wait(os_stat_q(eid2), _):
+                    eid2 == eid;
+                default: false;
+            }
+        }
     }
 }
 
-predicate RHL_ECB_ETbl_Q_P(addrval eid, EventCtr ecb, TCBMap tcbls){
-    switch (ecb) {
-        case EventCtr{{osevent : osevent, etbl : etbl}}:
-            forall (addrval tid, int32u time) {
-                switch (get(tid, tcbls)){
-                    case AbsTCB{{prio : prio, stat : wait(os_stat_q(eid2), time2)}}:
-                        PrioWaitInQ(prio, etbl) && osevent.OSEventType == OS_EVENT_TYPE_Q && eid == eid2 && time == time2;
-                    default: true;
-                }
-            };
-        default: true;
+/*
+ * High-to-low relation, queue case.
+ *
+ * For each task in tcbls, if the task is waiting for queue with the
+ * given eid, then the task exists in the priority table of the event,
+ * and the event type is queue.
+ */
+predicate RHL_ECB_ETbl_Q_P(addrval eid, EventCtr ecb, TCBMap tcbls) {
+    forall (addrval tid in tcbls) {
+        switch (get(tid, tcbls)) {
+            case AbsTCB{{prio: prio, stat: wait(os_stat_q(eid2), _)}}:
+                eid2 == eid ->
+                0 <= prio && prio < 64 &&
+                PrioWaitInQ(prio, ecb.etbl) &&
+                ecb.OSEventType == OS_EVENT_TYPE_Q;
+            default: true;
+        }
     }
 }
 
-// Sem case
-predicate RLH_ECB_ETbl_SEM_P(addrval eid, EventCtr ecb, TCBMap tcbls){
-    switch (ecb) {
-        case EventCtr{{osevent : osevent, etbl : etbl}}:
-            forall (int32u prio) {
-                PrioWaitInQ(prio, etbl) -> 
-                osevent.OSEventType == OS_EVENT_TYPE_SEM ->
-                exists (addrval tid, int32u time) {
-                    indom(tid, tcbls) && get(tid, tcbls).prio == prio &&
-                    get(tid, tcbls).stat == wait(os_stat_sem(eid), time)
-                }
-            };
-        default: true;
+/*
+ * Low-to-high relation, semaphore case.
+ *
+ * For each event control block of semaphore type, for each priority in
+ * the priority table of the event, the priority exists in tcbls, and
+ * the corresponding task has the status of waiting for the same event.
+ */
+predicate RLH_ECB_ETbl_SEM_P(addrval eid, EventCtr ecb, TCBMap tcbls) {
+    forall (int32u prio in range(0, 64)) {
+        PrioWaitInQ(prio, ecb.etbl) -> 
+        ecb.OSEventType == OS_EVENT_TYPE_SEM ->
+        exists (addrval tid in tcbls) {
+            get(tid, tcbls).prio == prio &&
+            switch (get(tid, tcbls).stat) {
+                case wait(os_stat_sem(eid2), _):
+                    eid2 == eid;
+                default: false;
+            }
+        }
     }
 }
 
-predicate RHL_ECB_ETbl_SEM_P(addrval eid, EventCtr ecb, TCBMap tcbls){
-    switch (ecb) {
-        case EventCtr{{osevent : osevent, etbl : etbl}}:
-            forall (addrval tid, int32u time) {
-                switch (get(tid, tcbls)) {
-                    case AbsTCB{{prio : prio, stat : wait(os_stat_sem(eid2), time2)}}:
-                        PrioWaitInQ(prio, etbl) && osevent.OSEventType == OS_EVENT_TYPE_SEM && eid == eid2 && time == time2;
-                    default: true;
-                }
-            };
-        default: true;
+/*
+ * High-to-low relation, semaphore case.
+ *
+ * For each task in tcbls, if the task is waiting for semaphore wit the
+ * given eid, then the task exists in the priority table of the event,
+ * and the event type is semaphore.
+ */
+predicate RHL_ECB_ETbl_SEM_P(addrval eid, EventCtr ecb, TCBMap tcbls) {
+    forall (addrval tid in tcbls) {
+        switch (get(tid, tcbls)) {
+            case AbsTCB{{prio: prio, stat: wait(os_stat_sem(eid2), _)}}:
+                eid2 == eid ->
+                0 <= prio && prio < 64 &&
+                PrioWaitInQ(prio, ecb.etbl) &&
+                ecb.OSEventType == OS_EVENT_TYPE_SEM;
+            default: true;
+        }
     }
 }
 
-// Mbox case
-predicate RLH_ECB_ETbl_MBOX_P(addrval eid, EventCtr ecb, TCBMap tcbls){
-    switch (ecb) {
-        case EventCtr{{osevent : osevent, etbl : etbl}}:
-            forall (int32u prio) {
-                PrioWaitInQ(prio, etbl) -> 
-                osevent.OSEventType == OS_EVENT_TYPE_MBOX ->
-                exists (addrval tid, int32u time) {
-                    indom(tid, tcbls) && get(tid, tcbls).prio == prio &&
-                    get(tid, tcbls).stat == wait(os_stat_sem(eid), time)
-                }
-            };
-        default: true;
+/*
+ * Low-to-high relation, mailbox case.
+ *
+ * For each event control block of mailbox type, for each priority in
+ * the priority queue of the event, the priority exists in tcbls, and
+ * the corresponding task has the status of waiting for the same event.
+ */
+predicate RLH_ECB_ETbl_MBOX_P(addrval eid, EventCtr ecb, TCBMap tcbls) {
+    forall (int32u prio in range(0, 64)) {
+        PrioWaitInQ(prio, ecb.etbl) -> 
+        ecb.OSEventType == OS_EVENT_TYPE_MBOX ->
+        exists (addrval tid in tcbls) {
+            get(tid, tcbls).prio == prio &&
+            switch (get(tid, tcbls).stat) {
+                case wait(os_stat_mbox(eid2), _):
+                    eid2 == eid;
+                default: false;
+            }
+            
+        }
     }
 }
 
-predicate RHL_ECB_ETbl_MBOX_P(addrval eid, EventCtr ecb, TCBMap tcbls){
-    switch (ecb) {
-        case EventCtr{{osevent : osevent, etbl : etbl}}:
-            forall (addrval tid, int32u time) {
-                switch (get(tid, tcbls)) {
-                    case AbsTCB{{prio : prio, stat : wait(os_stat_mbox(eid2), time2)}}:
-                        PrioWaitInQ(prio, etbl) && osevent.OSEventType == OS_EVENT_TYPE_MBOX && eid == eid2 && time == time2;
-                    default: true;
-                }
-            };
-        default: true;
+/*
+ * High-to-low relation, mailbox case.
+ *
+ * For each task in tcbls, if the task is waiting for mailbox with the
+ * given eid, then the task exists in the priority table of the event,
+ * and the event type is mailbox.
+ */
+predicate RHL_ECB_ETbl_MBOX_P(addrval eid, EventCtr ecb, TCBMap tcbls) {
+    forall (addrval tid in tcbls) {
+        switch (get(tid, tcbls)) {
+            case AbsTCB{{prio: prio, stat: wait(os_stat_mbox(eid2), _)}}:
+                eid2 == eid ->
+                0 <= prio && prio < 64 &&
+                PrioWaitInQ(prio, ecb.etbl) &&
+                ecb.OSEventType == OS_EVENT_TYPE_MBOX;
+            default: true;
+        }
     }
 }
 
-// Mutex case
-predicate RLH_ECB_ETbl_MUTEX_P(addrval eid, EventCtr ecb, TCBMap tcbls){
-    switch (ecb) {
-        case EventCtr{{osevent : osevent, etbl : etbl}}:
-            forall (int32u prio) {
-                PrioWaitInQ(prio, etbl) -> 
-                osevent.OSEventType == OS_EVENT_TYPE_MUTEX ->
-                exists (addrval tid, int32u time) {
-                    indom(tid, tcbls) && get(tid, tcbls).prio == prio &&
-                    get(tid, tcbls).stat == wait(os_stat_mutexsem(eid), time)
-                }
-            };
-        default: true;
+/*
+ * Low-to-high relation, mutex case.
+ *
+ * For each event control block of mutex type, for each priority in
+ * the priority table of the event, the priority exists in tcbls, and
+ * the corresponding task has the status of waiting for the same event.
+ */
+predicate RLH_ECB_ETbl_MUTEX_P(addrval eid, EventCtr ecb, TCBMap tcbls) {
+    forall (int32u prio in range(0, 64)) {
+        PrioWaitInQ(prio, ecb.etbl) -> 
+        ecb.OSEventType == OS_EVENT_TYPE_MUTEX ->
+        exists (addrval tid in tcbls) {
+            get(tid, tcbls).prio == prio &&
+            switch (get(tid, tcbls).stat) {
+                case wait(os_stat_mutexsem(eid2), _):
+                    eid2 == eid;
+                default: false;
+            }
+        }
     }
 }
 
-predicate RHL_ECB_ETbl_MUTEX_P(addrval eid, EventCtr ecb, TCBMap tcbls){
-    switch (ecb) {
-        case EventCtr{{osevent : osevent, etbl : etbl}}:
-            forall (addrval tid, int32u time) {
-                switch (get(tid, tcbls)) {
-                    case AbsTCB{{prio : prio, stat : wait(os_stat_mutexsem(eid2), time2)}}:
-                        PrioWaitInQ(prio, etbl) && osevent.OSEventType == OS_EVENT_TYPE_MUTEX && eid == eid2 && time == time2;
-                    default: true;
-                }
-            };
-        default: true;
+/*
+ * High-to-low relation, mutex case.
+ *
+ * For each task in tcbls, if the task is waiting for mutex with the
+ * given eid, then the task exists in the priority table of the event,
+ * and the event type is mutex.
+ */
+predicate RHL_ECB_ETbl_MUTEX_P(addrval eid, EventCtr ecb, TCBMap tcbls) {
+    forall (addrval tid in tcbls) {
+        switch (get(tid, tcbls)) {
+            case AbsTCB{{prio: prio, stat: wait(os_stat_mutexsem(eid2), _)}}:
+                eid2 == eid ->
+                0 <= prio && prio < 64 &&
+                PrioWaitInQ(prio, ecb.etbl) &&
+                ecb.OSEventType == OS_EVENT_TYPE_MUTEX;
+            default: true;
+        }
     }
 }
 
-// Collection of all low-to-high relations: ECB RTBL
-predicate RLH_ECB_ETbl_P(addrval eid, EventCtr ecb, TCBMap tcbls){
+/*
+ * Low-to-high relations: event control block vs. tcbls.
+ */
+predicate RLH_ECB_ETbl_P(addrval eid, EventCtr ecb, TCBMap tcbls) {
     RLH_ECB_ETbl_Q_P(eid, ecb, tcbls) &&
     RLH_ECB_ETbl_SEM_P(eid, ecb, tcbls) &&
     RLH_ECB_ETbl_MBOX_P(eid, ecb, tcbls) &&
     RLH_ECB_ETbl_MUTEX_P(eid, ecb, tcbls) 
 }
 
-// Collection of all high-to-low relations: ECB RTBL
-predicate RHL_ECB_ETbl_P(addrval eid, EventCtr ecb, TCBMap tcbls){
+/*
+ * High-to-low relations: event control block vs. tcbls.
+ */
+predicate RHL_ECB_ETbl_P(addrval eid, EventCtr ecb, TCBMap tcbls) {
     RHL_ECB_ETbl_Q_P(eid, ecb, tcbls) &&
     RHL_ECB_ETbl_SEM_P(eid, ecb, tcbls) &&
     RHL_ECB_ETbl_MBOX_P(eid, ecb, tcbls) &&
     RHL_ECB_ETbl_MUTEX_P(eid, ecb, tcbls) 
 }
 
-predicate Event_Type_P(struct OSEvent osevent){
-    osevent.OSEventType == OS_EVENT_TYPE_Q ||
-    osevent.OSEventType == OS_EVENT_TYPE_SEM ||
-    osevent.OSEventType == OS_EVENT_TYPE_MBOX ||
-    osevent.OSEventType == OS_EVENT_TYPE_MUTEX
+/*
+ * Invariant for OSEvent.
+ *
+ * - OSEventType is one of four possible choices.
+ */
+predicate Event_Type_P(EventCtr ecb) {
+    ecb.OSEventType == OS_EVENT_TYPE_Q ||
+    ecb.OSEventType == OS_EVENT_TYPE_SEM ||
+    ecb.OSEventType == OS_EVENT_TYPE_MBOX ||
+    ecb.OSEventType == OS_EVENT_TYPE_MUTEX
 }
 
-// All refinement relations for event information
+/*
+ * All relations and invariants for event control block.
+ */
 predicate R_ECB_ETbl_P(addrval eid, EventCtr ecb, TCBMap tcbls){
     RLH_ECB_ETbl_P(eid, ecb, tcbls) &&
     RHL_ECB_ETbl_P(eid, ecb, tcbls) &&
-    Event_Type_P(ecb.osevent)
+    Event_Type_P(ecb)
 }
 
-// Definition of TCBNode, TCBList, and TCBMap:
-
-predicate TCBNode_P(struct TCB tcb, int32u[] rtbl, struct AbsTCB abstcb) {
+/*
+ * All refinement relations and invariants for abstract and concrete
+ * task control blocks.
+ */
+predicate TCBNode_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
     tcb.msg == abstcb.msg &&
     tcb.prio == abstcb.prio &&
     RL_TCBblk_P(tcb) &&
     R_TCB_Status_P(tcb, rtbl, abstcb)
 }
 
+/*
+ * Refinement relations between data structures for all abstract and
+ * concrete task control blocks.
+ *
+ * - tcbList is the linked list of concrete task control blocks, with v
+ *   being the head pointer.
+ * - tcbls is the map of abstract task control blocks. It is formed by
+ *   adding tid/abstcb pairs one at a time in the definition of TCBList_P. 
+ */
 predicate TCBList_P(val v, TCBList tcbList, int32u[] rtbl, TCBMap tcbls) {
     switch (tcbList) {
         case nil: isEmpty(tcbls);
         case cons(tcb, tcbList2):
             switch (v) {
                 case Vptr(tid):
-                    exists (struct AbsTCB abstcb, TCBMap tcbls2) {
+                    exists (AbsTCB abstcb, TCBMap tcbls2) {
                         TCBNode_P(tcb, rtbl, abstcb) &&
                         TCBList_P(tcb.next, tcbList2, rtbl, tcbls2) &&
                         join(tid, abstcb, tcbls2, tcbls)
@@ -479,54 +562,115 @@ predicate TCBList_P(val v, TCBList tcbList, int32u[] rtbl, TCBMap tcbls) {
     }
 }
 
-// properties of PrioTbl, comes from os_inv.v and abs_op.v:
+// Properties of PrioTbl, comes from os_inv.v and abs_op.v:
 
-predicate R_Prio_No_Dup(TCBMap tcbls){
-    forall (addrval tid1, addrval tid2, AbsTCB abstcb) {
-        tid1 != tid2 -> indom(tid1, tcbls) -> indom(tid2, tcbls) ->
-        get(tid1, tcbls).prio != get(tid2, tcbls).prio
+/*
+ * There are no duplicate priorities in tcbls.
+ */
+predicate R_Prio_No_Dup(TCBMap tcbls) {
+    forall (addrval tid1 in tcbls) {
+        forall (addrval tid2 in tcbls) {
+            tid1 != tid2 ->
+            get(tid1, tcbls).prio != get(tid2, tcbls).prio
+        }
     }
 }
 
-predicate R_PrioTbl_P(PTBLMap ptbl, TCBMap tcbls, addrval vhold) {
-    forall (AbsTCB abstcb, addrval tcbid) {
-        0 <= abstcb.prio && abstcb.prio < 64 -> get(abstcb.prio, ptbl) == Vptr(tcbid) ->
-        tcbid != vhold -> indom(tcbid, tcbls)
+/*
+ * Invariant relating tcbls and ptbl (array of pointers to TCB).
+ *
+ * 1. For each priority in range, if the value in ptbl is Vptr(tid)
+ *    where tid is not vhold, then tid is in tcbls with the same priority.
+ * 2. For each task in tcbls, the corresponding entry in ptbl has the
+ *    right value that is not vhold.
+ * 3. There are no duplicate priorities in tcbls.
+ */
+predicate R_PrioTbl_P(val[] ptbl, TCBMap tcbls, addrval vhold) {
+    forall (int32u prio in range(0, 64)) {
+        switch (ptbl[prio]) {
+            case Vptr(tid):
+                tid != vhold ->
+                indom(tid, tcbls) && get(tid, tcbls).prio == prio;
+            default: true;
+        }
     } &&
-    forall (AbsTCB abstcb, addrval tcbid) {
-        indom(tcbid, tcbls) -> get(abstcb.prio, ptbl) == Vptr(tcbid) && tcbid != vhold
+    forall (addrval tid in tcbls) {
+        0 <= get(tid, tcbls).prio && get(tid, tcbls).prio < 64 &&
+        switch (ptbl[get(tid, tcbls).prio]) {
+            case Vptr(tid2):
+                tid == tid2 && tid != vhold;
+            default: false;
+        }
     } &&
     R_Prio_No_Dup(tcbls)
 }
 
-predicate RL_RTbl_PrioTbl_P(int32u[] rtbl, PTBLMap ptbl, addrval vhold){
-    forall (int32u prio) {
-        0 <= prio && prio < 64 -> prio_in_tbl(prio, rtbl) ->
-        exists (addrval tid) { get(prio, ptbl) == Vptr(tid) && tid != vhold }
+/*
+ * Invariant relating rtbl and ptbl.
+ *
+ * For each priority that is in rtbl, the corresponding entry in ptbl
+ * is in the form Vptr(tid), where tid is not vhold.
+ */
+predicate RL_RTbl_PrioTbl_P(int32u[] rtbl, val[] ptbl, addrval vhold){
+    forall (int32u prio in range(0, 64)) {
+        prio_in_tbl(prio, rtbl) ->
+        switch (ptbl[prio]) {
+            case Vptr(tid):
+                tid != vhold;
+            default: false;
+        }
     }
 }
 
+/*
+ * This lemma appears in OSMutexPostPart30. It states if ptbl is vhold at some
+ * priority, then that priority can be added into tcbls, without violating
+ * no-duplicate condition.
+ */
+query mutex_post_nodup {
+    fixes ptbl : val[];
+    fixes tcbls1 : TCBMap;
+    fixes tcbls2 : TCBMap;
+    fixes vhold : addrval;
+    fixes tid : addrval;
+    fixes block : int32u;
+    fixes abstcb : AbsTCB;
+    assumes R_PrioTbl_P(ptbl, tcbls1, vhold);
+    assumes ptbl[abstcb.prio] == Vptr(vhold);
+    assumes indom(tid, tcbls1);
+    assumes mapUpdate(tid, abstcb, tcbls1, tcbls2);
+    shows R_Prio_No_Dup(tcbls2)
+    proof { auto }
+}
+
+/*
+ * No waiting events in tcbls is present in ecbls.
+ */
 predicate ecb_no_exists_tcb(ECBMap ecbls, TCBMap tcbls) {
-    forall (addrval tid, addrval eid) {
-        switch(get(tid, tcbls)) {
-            case AbsTCB{{stat : wait(hwb, time)}}:
-                (hwb == os_stat_sem(eid) || hwb == os_stat_q(eid) || hwb == os_stat_mbox(eid) || hwb == os_stat_mutexsem(eid)) 
-                -> !indom(eid, ecbls);
-            default : false;
+    forall (addrval tid in tcbls) {
+        switch (get(tid, tcbls)) {
+            case AbsTCB{{stat: st}}:
+                switch (st) {
+                    case wait(os_stat_sem(eid), _):
+                        !indom(eid, ecbls);
+                    case wait(os_stat_q(eid), _):
+                        !indom(eid, ecbls);
+                    case wait(os_stat_mbox(eid), _):
+                        !indom(eid, ecbls);
+                    case wait(os_stat_mutexsem(eid), _):
+                        !indom(eid, ecbls);
+                    default: true;
+                };
         }
     }
 }
 
 // ucos_common.v
 
-predicate prio_neq_cur(TCBMap tcbls, addrval curtid, int32u curprio){
-    forall (addrval tid) {
+predicate prio_neq_cur(TCBMap tcbls, addrval curtid, int32u curprio) {
+    forall (addrval tid in tcbls) {
         tid != curtid -> 
-        if (indom(tid, tcbls)) {
-            get(tid, tcbls).prio != curprio
-        } else {
-            true
-        }
+        get(tid, tcbls).prio != curprio
     }
 }
 
@@ -550,7 +694,7 @@ predicate prio_neq_cur(TCBMap tcbls, addrval curtid, int32u curprio){
  * of the mutex is always less than 64.
  *
  */
-predicate RH_ECB_P(struct AbsECB absecb) {
+predicate RH_ECB_P(AbsECB absecb) {
     switch (absecb.edata) {
         case abssem(count): 
             (count > 0 -> absecb.wset == nil) &&
@@ -661,7 +805,7 @@ predicate MatchMutexSem(val x, val y, int32u prio, Option<owner> owner) {
 /*
  * Matching between low-level and high-level event data
  */
-predicate RLH_ECBData_P(leventdata lecb, struct AbsECB hecb) {
+predicate RLH_ECBData_P(leventdata lecb, AbsECB hecb) {
     switch (lecb) {
         case DMsgQ(a, osq, osqblk, msgtbl):
             switch (hecb.edata) {
@@ -703,14 +847,10 @@ predicate ECBList_P(val v, val tl, List<EventCtr> ecbList, List<leventdata> edls
                     switch(edls){
                         case nil: false;
                         case cons(enode, edls2):
-                            switch(ecb){
-                                case EventCtr{{osevent : osevent, etbl : etbl}}:
-                                    exists (struct AbsECB absmq, ECBMap ecbls2) {
-                                        RLH_ECBData_P(enode, absmq) &&
-                                        ECBList_P(osevent.OSEventListPtr, tl, ecbList2, edls2, ecbls2, tcbls) &&
-                                        join(eid, absmq, ecbls2, ecbls)
-                                    };
-                                default: false;
+                            exists (AbsECB absmq, ECBMap ecbls2) {
+                                RLH_ECBData_P(enode, absmq) &&
+                                ECBList_P(ecb.OSEventListPtr, tl, ecbList2, edls2, ecbls2, tcbls) &&
+                                join(eid, absmq, ecbls2, ecbls)
                             };
                         default: false;
                     };
@@ -965,19 +1105,50 @@ query semcre_RH_TCBList_ECBList_P {
 }
 
 // tasksuspend.v
+/* TODO
+query ECBList_P_preserve {
+    fixes vptr : val;
+    fixes ecbList : List<EventCtr>;
+    fixes edls : List<leventdata>;
+    fixes ecbls : ECBMap;
+    fixes tcbls : TCBMap;
+    fixes tcbls_new : TCBMap;
+    fixes tid : addrval;
+    fixes prio1 : int32u;
+    fixes st1 : taskstatus;
+    fixes msg1 : val;
+    fixes sus1 : bool;
+    assumes H1: ECBList_P(vptr, Vnull, ecbList, edls, ecbls, tcbls);
+    assumes H2: get(tid, tcbls) == AbsTCB{{prio: prio1, stat: st1, msg: msg1, sus: sus1}};
+    assumes H3: mapUpdate(tid, AbsTCB{{prio: prio1, stat: st1, msg: msg1, sus: true}}, tcbls, tcbls_new);
+    shows ECBList_P(vptr, Vnull, ecbList, edls, ecbls, tcbls_new)
+    proof {
+        induction(ecbList){
+            case nil: auto;
+            case cons(ecb, ecbList2):
+                cases(vptr) {
+                    case Vptr(eid):
+                        simplify;;
+                        split_conj(H1, [H11, H12]);
+                    default: auto;
+                };
+        }
+    }
+}
+*/
 
 query RL_TCBblk_P_suspend {
-    fixes tcb : struct TCB;
+    fixes tcb : TCB;
     assumes RL_TCBblk_P(tcb);
     shows RL_TCBblk_P(tcb{stat := tcb.stat | OS_STAT_SUSPEND})
     proof { auto }
 }
 
 query R_TCB_Status_P_suspend {
-    fixes tcb : struct TCB;
+    fixes tcb : TCB;
     fixes rtbl : int32u[];
     fixes rtbl2 : int32u[];
-    fixes abstcb : struct AbsTCB;
+    fixes abstcb : AbsTCB;
     assumes prio_not_in_tbl(tcb.prio, rtbl2);
     assumes tcb.prio < 64;
     assumes R_TCB_Status_P(tcb, rtbl, abstcb);
@@ -986,7 +1157,7 @@ query R_TCB_Status_P_suspend {
 }
 
 query R_PrioTbl_P_suspend {
-    fixes ptbl : PTBLMap;
+    fixes ptbl : val[];
     fixes tcbls : TCBMap;
     fixes tcbls_new : TCBMap;
     fixes vhold : addrval;
@@ -1018,13 +1189,60 @@ query RH_TCBList_ECBList_P_suspend {
 
 // Mbox_common.v
 
+query RH_TCBList_ECBList_P_high_block_hold_mbox {
+    fixes ecbls : ECBMap;
+    fixes tcbls : TCBMap;
+    fixes qid : addrval;
+    fixes pcur : addrval;
+    fixes msgList : val;
+    fixes wl: List<addrval>;
+    fixes m1: val;
+    fixes m2 : val;
+    fixes sus1 : bool;
+    fixes sus2 : bool;
+    fixes prio : int32u;
+    fixes ecbls2 : ECBMap;
+    fixes tcbls2 : TCBMap;
+    fixes time : int32u;
+    assumes indom(qid, ecbls);
+    assumes get(qid, ecbls) == AbsECB{{edata: absmbox(msgList), wset: wl}};
+    assumes indom(pcur, tcbls);
+    assumes get(pcur, tcbls) == AbsTCB{{prio: prio, stat: rdy, msg: m1, sus: sus1}};
+    assumes RH_TCBList_ECBList_MBOX_P(ecbls, tcbls);
+    assumes mapUpdate(qid, AbsECB{{edata: absmbox(msgList), wset: cons(pcur, wl)}}, ecbls, ecbls2);
+    assumes mapUpdate(pcur, AbsTCB{{prio: prio, stat: wait(os_stat_mbox(qid), time), msg: m2, sus: sus2}}, tcbls, tcbls2);
+    shows RH_TCBList_ECBList_MBOX_P(ecbls2, tcbls2)
+    proof { auto }
+}
+
+query R_ECB_ETbl_P_high_tcb_block_hold {
+    fixes tcbls : TCBMap;
+    fixes tcbls_new : TCBMap;
+    fixes eid : addrval;
+    fixes ecb : EventCtr;
+    fixes tid : addrval;
+    fixes abstcb : AbsTCB;
+    fixes y : int32u;
+    fixes time : int32u;
+    assumes Hprio : 0 < abstcb.prio && abstcb.prio < 64;
+    assumes Hose : ecb.OSEventType == OS_EVENT_TYPE_MBOX;
+    assumes H1 : R_ECB_ETbl_P(eid, ecb, tcbls);
+    assumes H2 : indom(tid, tcbls) && get(tid, tcbls) == abstcb;
+    assumes Hxy : y == abstcb.prio >> 3;
+    assumes Hmapup : mapUpdate(tid, abstcb{stat := wait(os_stat_mbox(eid), time)}, tcbls, tcbls_new);
+    shows R_ECB_ETbl_P(eid, ecb{OSEventGrp := ecb.OSEventGrp | (1 << y),
+                                etbl := ecb.etbl[y := ecb.etbl[y] | (1 << (abstcb.prio & 7))]},
+                       tcbls_new)
+    proof { auto }
+}
+
 // The following theorems comes from OSTimeDlyPure.v
 
-query R_PrioTbl_P_hold1{
+query R_PrioTbl_P_hold1 {
     fixes tid : addrval;
     fixes st : taskstatus;
     fixes tcbls : TCBMap;
-    fixes ptbl : PTBLMap;
+    fixes ptbl : val[];
     fixes tcbls0 : TCBMap;
     fixes vhold : addrval;
     fixes abstcb : AbsTCB;
@@ -1032,26 +1250,52 @@ query R_PrioTbl_P_hold1{
     assumes indom(tid, tcbls) && get(tid, tcbls) == abstcb;
     assumes mapUpdate(tid, abstcb{stat := st}, tcbls, tcbls0);
     shows R_PrioTbl_P(ptbl, tcbls0, vhold)
-    proof{ auto }
+    proof { auto }
 }
 
-query RH_CurTCB_hold1 {
+query RH_TCBList_ECBList_P_hold1 {
+    fixes ecbls : ECBMap;
+    fixes tcbls : TCBMap;
+    fixes tcbls_new : TCBMap;
+    fixes tid : addrval;
+    fixes abstcb : AbsTCB;
+    fixes i : int32u;
+    assumes RH_TCBList_ECBList_P(ecbls, tcbls);
+    assumes indom(tid, tcbls) && get(tid, tcbls) == abstcb;
+    assumes switch (abstcb.stat) {
+        case rdy: true;
+        case wait(os_stat_time, _): true;
+        default: false;
+    };
+    assumes mapUpdate(tid, abstcb{stat := wait(os_stat_time, i)}, tcbls, tcbls_new);
+    shows RH_TCBList_ECBList_P(ecbls, tcbls_new)
+    proof { auto }
+}
+
+query ecb_etbl_prop {
     fixes tid : addrval;
     fixes tcbls : TCBMap;
     fixes tcbls_new : TCBMap;
     fixes abstcb : AbsTCB;
+    fixes eid : addrval;
+    fixes ecb : EventCtr;
     fixes i : int32u;
-    assumes exists(AbsTCB abstcb0) { indom(tid, tcbls) && get(tid, tcbls) == abstcb0 };
     assumes indom(tid, tcbls) && get(tid, tcbls) == abstcb;
-    assumes join(tid, abstcb{stat := wait(os_stat_time, i)}, tcbls, tcbls_new);
-    shows exists (AbsTCB abstcb1) { indom(tid, tcbls_new) && get(tid, tcbls_new) == abstcb1 }
+    assumes switch (abstcb.stat) {
+        case rdy: true;
+        case wait(os_stat_time, _): true;
+        default: false;
+    };
+    assumes mapUpdate(tid, abstcb{stat := wait(os_stat_time, i)}, tcbls, tcbls_new);
+    assumes R_ECB_ETbl_P(eid, ecb, tcbls);
+    shows R_ECB_ETbl_P(eid, ecb, tcbls_new)
     proof { auto }
 }
 
 query low_stat_rdy_imp_high {
-    fixes tcb : struct TCB;
+    fixes tcb : TCB;
     fixes rtbl : int32u[];
-    fixes abstcb : struct AbsTCB;
+    fixes abstcb : AbsTCB;
     assumes RL_TCBblk_P(tcb);
     assumes R_TCB_Status_P(tcb, rtbl, abstcb);
     assumes tcb.stat == OS_STAT_RDY;
@@ -1061,9 +1305,9 @@ query low_stat_rdy_imp_high {
 }
 
 query low_stat_nordy_imp_high {
-    fixes tcb : struct TCB;
+    fixes tcb : TCB;
     fixes rtbl : int32u[];
-    fixes abstcb : struct AbsTCB;
+    fixes abstcb : AbsTCB;
     assumes R_TCB_Status_P(tcb, rtbl, abstcb);
     assumes (tcb.stat != OS_STAT_RDY || tcb.dly != 0);
     shows !(abstcb.stat == rdy && abstcb.sus == false)
@@ -1071,9 +1315,9 @@ query low_stat_nordy_imp_high {
 }
 
 query RLH_Rdy_prioneq_prop_hold {
-    fixes tcb : struct TCB;
+    fixes tcb : TCB;
     fixes rtbl : int32u[];
-    fixes abstcb : struct AbsTCB;
+    fixes abstcb : AbsTCB;
     fixes prio : int32u;
     assumes prio != tcb.prio;
     assumes RLH_RdyI_P(tcb, rtbl, abstcb);
@@ -1084,9 +1328,9 @@ query RLH_Rdy_prioneq_prop_hold {
 }
 
 query RHL_Rdy_prioneq_prop_hold {
-    fixes tcb : struct TCB;
+    fixes tcb : TCB;
     fixes rtbl : int32u[];
-    fixes abstcb : struct AbsTCB;
+    fixes abstcb : AbsTCB;
     fixes prio : int32u;
     assumes prio != tcb.prio;
     assumes prio < 64;
@@ -1098,9 +1342,9 @@ query RHL_Rdy_prioneq_prop_hold {
 }
 
 query RLH_Suspend_prioneq_prop_hold {
-    fixes tcb : struct TCB;
+    fixes tcb : TCB;
     fixes rtbl : int32u[];
-    fixes abstcb : struct AbsTCB;
+    fixes abstcb : AbsTCB;
     fixes prio : int32u;
     assumes prio != tcb.prio;
     assumes prio < 64;
@@ -1112,9 +1356,9 @@ query RLH_Suspend_prioneq_prop_hold {
 }
 
 query RHL_Suspend_prioneq_prop_hold {
-    fixes tcb : struct TCB;
+    fixes tcb : TCB;
     fixes rtbl : int32u[];
-    fixes abstcb : struct AbsTCB;
+    fixes abstcb : AbsTCB;
     fixes prio : int32u;
     assumes prio != tcb.prio;
     assumes prio < 64;
@@ -1126,9 +1370,9 @@ query RHL_Suspend_prioneq_prop_hold {
 }
 
 query RLH_Wait_prioneq_prop_hold {
-    fixes tcb : struct TCB;
+    fixes tcb : TCB;
     fixes rtbl : int32u[];
-    fixes abstcb : struct AbsTCB;
+    fixes abstcb : AbsTCB;
     fixes prio : int32u;
     assumes prio != tcb.prio;
     assumes prio < 64;
@@ -1140,9 +1384,9 @@ query RLH_Wait_prioneq_prop_hold {
 }
 
 query RHL_Wait_prioneq_prop_hold {
-    fixes tcb : struct TCB;
+    fixes tcb : TCB;
     fixes rtbl : int32u[];
-    fixes abstcb : struct AbsTCB;
+    fixes abstcb : AbsTCB;
     fixes prio : int32u;
     assumes prio != tcb.prio;
     assumes prio < 64;
@@ -1157,7 +1401,7 @@ query rtbl_remove_RL_RTbl_PrioTbl_P_hold {
     fixes prio : int32u;
     fixes bitx : int32u;
     fixes rtbl : int32u[];
-    fixes ptbl : PTBLMap;
+    fixes ptbl : val[];
     fixes vhold : addrval;
     assumes 0 <= prio && prio < 64;
     assumes RL_RTbl_PrioTbl_P(rtbl, ptbl, vhold);
@@ -1169,9 +1413,9 @@ query rtbl_remove_RL_RTbl_PrioTbl_P_hold {
 
 // Combination of the above results. Only this is really needed.
 query TCBNode_P_prioneq_prop_hold {
-    fixes tcb : struct TCB;
+    fixes tcb : TCB;
     fixes rtbl : int32u[];
-    fixes abstcb : struct AbsTCB;
+    fixes abstcb : AbsTCB;
     fixes prio : int32u;
     assumes prio != abstcb.prio;
     assumes prio < 64;
@@ -1182,32 +1426,52 @@ query TCBNode_P_prioneq_prop_hold {
 
 query map_get_test {
     fixes tid2 : addrval;
-    fixes abstcb2 : struct AbsTCB;
+    fixes abstcb2 : AbsTCB;
     fixes tcbls : TCBMap;
     fixes prio : int32u;
     fixes tcbls_join : TCBMap;
     assumes join(tid2, abstcb2, tcbls, tcbls_join);
-    assumes forall (addrval tid) {
-        indom(tid, tcbls_join) -> get(tid, tcbls_join).prio != prio
+    assumes forall (addrval tid in tcbls_join) {
+        get(tid, tcbls_join).prio != prio
     };
-    shows forall (addrval tid) {
-        indom(tid, tcbls) -> get(tid, tcbls).prio != prio
+    shows forall (addrval tid in tcbls) {
+        get(tid, tcbls).prio != prio
     }
     proof { auto }
 }
 
 query tcbjoin_join_get_neq {
     fixes ptcb : addrval;
-    fixes a : struct AbsTCB;
+    fixes a : AbsTCB;
     fixes tcbls1 : TCBMap;
     fixes tcbls2 : TCBMap;
     assumes join(ptcb, a, tcbls1, tcbls2);
-    shows forall (addrval tid, struct AbsTCB b) {
+    shows forall (addrval tid, AbsTCB b) {
         tid != ptcb -> indom(tid, tcbls1) -> get(tid, tcbls1) == get(tid, tcbls2)
     }
     proof { auto }
 }
 
+query TCBList_P_tcb_dly_hold1 {
+    fixes time : int32u;
+    fixes tcb : TCB;
+    fixes rtbl : int32u[];
+    fixes abstcb : AbsTCB;
+    assumes H1 : 0 < time && time <= 65535;
+    assumes H2 : TCBNode_P(tcb, rtbl, abstcb);
+    assumes H3 :
+        switch (abstcb.stat) {
+            case rdy: abstcb.sus == false;
+            case wait(os_stat_time, _): true;
+            default: false;
+        };
+    shows TCBNode_P(
+        tcb{dly := time},
+        rtbl[tcb.y := rtbl[tcb.y] & ~tcb.bitx],
+        abstcb{stat := wait(os_stat_time, time)}
+    )
+    proof { auto }
+}
 
 del_attrib rewrite for TCBNode_P_def
 
@@ -1217,8 +1481,8 @@ query update_rtbl_tcblist_hold {
     fixes rtbl : int32u[];
     fixes tcbls : TCBMap;
     fixes prio : int32u;
-    assumes H1: forall (addrval tid) {
-        indom(tid, tcbls) -> get(tid, tcbls).prio != prio
+    assumes H1: forall (addrval tid in tcbls) {
+        get(tid, tcbls).prio != prio
     };
     assumes H2: TCBList_P(vptr, tcbList, rtbl, tcbls);
     assumes H3: prio < 64;
@@ -1230,7 +1494,7 @@ query update_rtbl_tcblist_hold {
                 cases(vptr) {
                     case Vptr(tid):
                         simplify;;
-                        skolemize;;
+                        skolemize(H2, [AbsTCB abstcb2, TCBMap tcbls2]);;
                         split_conj(H2, [H21, H22, H23]);;
                         match_show(H23) {
                             1: apply_theorem(TCBNode_P_prioneq_prop_hold, [_, H3, H21]);;
@@ -1249,43 +1513,79 @@ query TCBList_P_tcb_dly_hold {
     fixes rtbl : int32u[];
     fixes vptr : val;
     fixes tcbls : TCBMap;
-    fixes tcbls1 : TCBMap;
     fixes prio : int32u;
     fixes ptcb : addrval;
-    fixes abstcb : struct AbsTCB;
-    assumes H1 : 0 <= abstcb.prio && abstcb.prio < 64;
+    assumes H1 : prio < 64;
     assumes H2 : TCBList_P(vptr, tcbList, rtbl, tcbls);
-    assumes H3 : join(ptcb, abstcb, tcbls, tcbls1);
-    assumes H4 : prio_neq_cur(tcbls, ptcb, abstcb.prio);
-    shows TCBList_P(vptr, tcbList, rtbl[abstcb.prio >> 3 := rtbl[abstcb.prio >> 3] & ~ (1 << (abstcb.prio & 7))], tcbls)
+    assumes H3 : !indom(ptcb, tcbls);
+    assumes H4 : prio_neq_cur(tcbls, ptcb, prio);
+    shows TCBList_P(vptr, tcbList, rtbl[prio >> 3 := rtbl[prio >> 3] & ~ (1 << (prio & 7))], tcbls)
     proof {
-        split_conj(H1, [H11, H12]);;
-        apply_theorem(update_rtbl_tcblist_hold, [_, H2, H12]);;
-        simplify;;
+        apply_theorem(update_rtbl_tcblist_hold, [_, H2, H1]);;
         auto
     }
 }
 
+query TCBList_P_tcb_dly_hold2 {
+    fixes time : int32u;
+    fixes tcb : TCB;
+    fixes tcbList : TCBList;
+    fixes rtbl : int32u[];
+    fixes ptcb : addrval;
+    fixes abstcb : AbsTCB;
+    fixes tcbls : TCBMap;
+    fixes tcbls2 : TCBMap;
+    assumes H0 : RL_TCBblk_P(tcb);
+    assumes H1 : 0 < time && time <= 65535;
+    assumes H2 : TCBList_P(Vptr(ptcb), cons(tcb, tcbList), rtbl, tcbls);
+    assumes H3 : indom(ptcb, tcbls) && get(ptcb, tcbls) == abstcb;
+    assumes H4 :
+        switch (abstcb.stat) {
+            case rdy: abstcb.sus == false;
+            case wait(os_stat_time, _): true;
+            default: false;
+        };
+    assumes H5 : prio_neq_cur(tcbls, ptcb, tcb.prio);
+    assumes H6 : mapUpdate(ptcb, abstcb{stat := wait(os_stat_time, time)}, tcbls, tcbls2);
+    shows TCBList_P(Vptr(ptcb), cons(tcb{dly := time}, tcbList), rtbl[tcb.y := rtbl[tcb.y] & ~tcb.bitx], tcbls2)
+    proof { 
+        simplify;;
+        skolemize(H2, [AbsTCB abstcb2, TCBMap tcbls3]);;
+        split_conj(H2, [H21, H22, H23]);;
+        exists(abstcb{stat := wait(os_stat_time, time)}, tcbls3) {
+            1: apply_theorem(TCBList_P_tcb_dly_hold1, [H1]) {
+                1: auto;
+                2: auto;
+            };
+            2: change (tcb.y == tcb.prio >> 3) { auto };;
+               change (tcb.bitx == (1 << (tcb.prio & 7))) { auto };;
+               assert (H5a: prio_neq_cur(tcbls3, ptcb, tcb.prio)) { auto };;
+               apply_theorem(TCBList_P_tcb_dly_hold, [_, H22, _, H5a]) {
+                 1: auto;
+                 2: auto;
+               };
+            3: auto;
+        }
+    }
+}
+
 // task_pure.v
-/*
-query r_priotbl_p_hold_for_del_a_tcb{
-    fixes ptbl : PTBLMap;
-    fixes ptbl_new : PTBLMap;
+
+query r_priotbl_p_hold_for_del_a_tcb {
+    fixes ptbl : val[];
     fixes abstcb : AbsTCB;
     fixes vhold : addrval;
     fixes head : addrval;
-    fixes tcbls_sig : TCBMap;
     fixes tcbls : TCBMap;
     fixes tcbls_left : TCBMap;
     assumes H1 : 0 <= abstcb.prio && abstcb.prio < 64;
     assumes H2 : R_PrioTbl_P(ptbl, tcbls, vhold);
     assumes H3 : join(head, abstcb, tcbls_left, tcbls);
-    assumes H4 : mapUpdate(abstcb.prio, Vnull, ptbl, ptbl_new);
-    shows R_PrioTbl_P(ptbl_new, tcbls_left, vhold)
+    shows R_PrioTbl_P(ptbl[abstcb.prio := Vnull], tcbls_left, vhold)
     proof { auto }
 }
-*/
-query priowaitinq_is_prio_in_tbl{
+
+query priowaitinq_is_prio_in_tbl {
     fixes prio : int32u;
     fixes rtbl : int32u[];
     assumes 0 <= prio && prio < 64;
@@ -1295,6 +1595,9 @@ query priowaitinq_is_prio_in_tbl{
     proof { auto }
 }
 
+/*
+ * Lemma used in task_pure.v.
+ */
 query ecb_no_exists_tcb_sub {
     fixes ecbls1 : ECBMap;
     fixes ecbls2 : ECBMap;
@@ -1312,5 +1615,41 @@ query R_Prio_No_Dup_hold_for_subset {
     fixes tcbls2 : TCBMap;
     assumes join(tid, abstcb, tcbls1, tcbls2);
     shows R_Prio_No_Dup(tcbls2) -> R_Prio_No_Dup(tcbls1)
+    proof { auto }
+}
+
+query TcbIsWait {
+    fixes tcb : TCB;
+    fixes abstcb : AbsTCB;
+    fixes rtbl : int32u[];
+    assumes R_TCB_Status_P(tcb, rtbl, abstcb);
+    assumes tcb.stat == OS_STAT_SEM || tcb.stat == OS_STAT_Q ||
+            tcb.stat == OS_STAT_MBOX || tcb.stat == OS_STAT_MUTEX || 
+            tcb.stat == (OS_STAT_SEM | OS_STAT_SUSPEND) || tcb.stat == (OS_STAT_Q | OS_STAT_SUSPEND) || 
+            tcb.stat == (OS_STAT_MBOX | OS_STAT_SUSPEND) || tcb.stat == (OS_STAT_MUTEX | OS_STAT_SUSPEND);
+    shows
+        switch (tcb.eptr) {
+            case Vptr(eid): true;
+            default: false;
+        } &&
+        switch (abstcb.stat) {
+            case wait(os_stat_sem(_), dly):
+                dly == tcb.dly;
+            case wait(os_stat_q(_), dly):
+                dly == tcb.dly;
+            case wait(os_stat_mbox(_), dly):
+                dly == tcb.dly;
+            case wait(os_stat_mutexsem(_), dly):
+                dly == tcb.dly;
+            default: false;
+        }
+    proof { auto }
+}
+
+query remove_tid_not_nil {
+    fixes tid : addrval;
+    fixes tidls : List<addrval>;
+    assumes list_remove(tid, tidls) != nil;
+    shows tidls != nil
     proof { auto }
 }

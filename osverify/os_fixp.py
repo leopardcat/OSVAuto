@@ -43,4 +43,4 @@ class OSFunction:
         TODO: check for mutually recursive definitions.
         
         """
-        return self.name in self.body.get_funcs()
+        return (self.name, self.get_func_type()) in self.body.get_funcs()

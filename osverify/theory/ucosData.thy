@@ -21,12 +21,16 @@ struct TCB {
     int32u flag;
 }
 
-struct OSEvent {
+/*
+ * Low-level description of events.
+ */
+struct EventCtr {
     int32u OSEventType;
     int32u OSEventGrp;
     int32u OSEventCnt;
     val OSEventPtr;
     val OSEventListPtr;
+    int32u[] etbl;
 }
 
 consts {
@@ -62,9 +66,9 @@ struct AbsTCB {
     bool sus;
 }
 
-typedef TCBMap = Map<addrval, struct AbsTCB>;
+typedef TCBMap = Map<addrval, AbsTCB>;
 
-typedef TCBList = List<struct TCB>;
+typedef TCBList = List<TCB>;
 
 typedef PTBLMap = Map<int32u, val>;
 
@@ -109,7 +113,7 @@ struct AbsECB {
 }
 
 // Mapping from address to abstract ECB
-typedef ECBMap = Map<addrval, struct AbsECB>;
+typedef ECBMap = Map<addrval, AbsECB>;
 
 // Structure of low-level queue
 struct osqueue {
@@ -149,9 +153,3 @@ datatype leventdata =
   | DSem(int32u count)
   | DMbox(val msg)
   | DMutex(val x, val y)
-
-// Definition of EventCtr
-struct EventCtr {
-    struct OSEvent osevent;
-    int32u[] etbl;
-}

@@ -37,7 +37,10 @@ class Theorem:
         tyinst = dict(zip(self.type_params, tys))
         res = self.prop.subst_type(tyinst)
         params = [param.subst_type(tyinst) for param in self.params]
-        return os_term.OSQuant("forall", params, res)
+        if params:
+            return os_term.OSQuant("forall", params, res)
+        else:
+            return res
 
 class TheoremSpec:
     """Specification for applying a theorem."""
@@ -141,23 +144,96 @@ class OSTheory:
             # If function is not recursive, add 'rewrite' attribute for
             # definition
             self.attribute_map['rewrite'].append(fixp_def)
-        elif isinstance(fixp.body, os_term.OSSwitch) and fixp.body.switch_expr in fixp.params and \
+        elif isinstance(fixp.body, os_term.OSSwitch) and \
+            fixp.body.switch_expr in fixp.params and \
             is_standard_switch(self, fixp.body):
             # Otherwise, if the function body is switch on one of the input parameters,
             # add 'rewrite' attribute for simplification rules
             switch_id = fixp.params.index(fixp.body.switch_expr)
             for i, branch in enumerate(fixp.body.branches):
                 if isinstance(branch, os_term.OSSwitchBranchCase):
+                    # Left side: replace the switched variable with the pattern
                     lhs = os_term.OSFun(
                         fixp.name, *(fixp.params[:switch_id] + (branch.pattern,) + fixp.params[switch_id+1:]),
                         type=fixp.ret_type)
                     eq = os_term.eq(lhs, branch.expr)
+                    # List of parameters: just get variables from the left side
+                    ty_params, params = lhs.get_vars()
                     fixp_simp = fixp.name + "_simps" + str(i+1)
-                    self.add_theorem(fixp_simp, Theorem(fixp_simp, fixp.type_params, fixp.params, eq))
+                    self.add_theorem(fixp_simp, Theorem(fixp_simp, ty_params, params, eq))
                     self.attribute_map['rewrite'].append(fixp_simp)
                 else:
                     # TODO: add default cases
                     pass
+
+    def get_func_type(self, func_name: str) -> Tuple[OSType, Tuple[str]]:
+        """Obtain the parameterized type of the function.
+        
+        Functions in the theory are divided into the following classes:
+        
+        - Fixpoint function, stored in fixps.
+        - Axiomatic functions, stored in axiom_func.
+        - Constructors of datatypes.
+        - Field accessors of structures and datatypes (including .id).
+
+        Returns
+        -------
+        OSType
+            type of the function
+        Tuple[str]
+            ordered list of type parameters in the returned type
+
+        """
+        # Fixpoint functions
+        if func_name in self.fixps:
+            fixp = self.fixps[func_name]
+            return fixp.get_func_type(), fixp.type_params
+
+        # Axiomatic functions
+        if func_name in self.axiom_func:
+            ax_func = self.axiom_func[func_name]
+            return ax_func.type, ax_func.type_params
+
+        # Constructor
+        if func_name in self.constr_datatype:
+            ty_name = self.constr_datatype[func_name]
+            datatype = self.datatypes[ty_name]
+            branch = datatype.branch_map[func_name]
+            branch_tys = [ty for _, ty in branch.params]
+            param_tys = [os_struct.OSBoundType(param) for param in datatype.params]
+            if len(branch_tys) > 0:
+                res_ty = os_struct.OSFunctionType(*(branch_tys + [os_struct.OSHLevelType(ty_name, *param_tys)]))
+            else:
+                res_ty = os_struct.OSHLevelType(ty_name, *param_tys)
+            return res_ty, datatype.params
+
+        dot_pos = func_name.find(".")
+        # Field of a structure or datatype
+        if dot_pos != -1:
+            ty_name = func_name[:dot_pos]
+            if ty_name in self.structs:
+                # Field of a structure
+                struct = self.structs[ty_name]
+                field = func_name[dot_pos+1:]
+                assert field in struct.field_map, \
+                    "get_func_type: field %s not found in structure %s" % (field, ty_name)
+                res_ty = os_struct.OSFunctionType(os_struct.OSStructType(ty_name), struct.field_map[field])
+                return res_ty, tuple()
+
+            if ty_name in self.datatypes:
+                # Field of datatype
+                datatype = self.datatypes[ty_name]
+                field = func_name[dot_pos+1:]
+                param_tys = [os_struct.OSBoundType(param) for param in datatype.params]
+                if field == "id":
+                    res_ty = os_struct.OSFunctionType(os_struct.OSHLevelType(ty_name, *param_tys), os_struct.Int)
+                else:
+                    assert field in datatype.field_map, \
+                        "get_func_type: field %s not found in structure %s" % (field, ty_name)
+                    res_ty = os_struct.OSFunctionType(os_struct.OSHLevelType(ty_name, *param_tys), datatype.field_map[field])
+                return res_ty, datatype.params
+
+        raise AssertionError("get_func_type: %s" % func_name)
 
     def get_sch_theorem(self, thm_name: str) -> OSTerm:
         """Obtain theorem with schematic variables.
@@ -237,7 +313,12 @@ class OSTheory:
             self.add_theorem(query.query_name, Theorem(query.query_name, query.type_params, query.fixes, prop))
 
     def get_field_type(self, ty: OSType, field_name: str) -> OSType:
-        """Obtain type of the given field of structure or datatype."""
+        """Obtain type of the given field of structure or datatype.
+        
+        This function automatically instantiates the type parameters according
+        to the input type.
+        
+        """
         if isinstance(ty, os_struct.OSStructType):
             struct = self.structs[ty.name]
             return struct.field_map[field_name]
@@ -286,7 +367,8 @@ def expand_type(thy: OSTheory, ty: OSType) -> OSType:
         else:
             return os_struct.OSHLevelType(ty.name, *(expand_type(thy, param) for param in ty.params))
     elif isinstance(ty, os_struct.OSFunctionType):
-        return os_struct.OSFunctionType(*([expand_type(thy, arg) for arg in ty.arg_types] + expand_type(thy, ty.ret_type)))
+        return os_struct.OSFunctionType(
+            *([expand_type(thy, arg) for arg in ty.arg_types] + [expand_type(thy, ty.ret_type)]))
     else:
         raise NotImplementedError("expand_type on %s: %s" % (type(ty), ty))
 
@@ -771,6 +853,9 @@ class OSContext:
 
         # Temporary type parameters
         self.type_params: List[str] = list()
+
+        # List of declared tactic variables
+        self.tactic_vars: Set[str] = set()
 
     def add_var_decl(self, var_name: str, type: OSType = os_struct.OSVoidType):
         """Add variable declaration"""

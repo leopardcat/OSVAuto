@@ -32,12 +32,12 @@ class ModelTest(unittest.TestCase):
         query = """
         query testDatatype {
             fixes xs : List<int32u>;
-            assumes xs == cons(1, cons(2, nil))
+            assumes xs == [1, 2]
         }
         """
         query = os_parser.parse_query(thy, query)
         model = os_z3wrapper.solve_model(thy, query)
-        self.assertEqual(str(model.data["xs"]), "cons(1, cons(2, nil))")
+        self.assertEqual(str(model.data["xs"]), "[1, 2]")
 
 
 if __name__ == "__main__":

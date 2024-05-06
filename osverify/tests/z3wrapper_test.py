@@ -22,7 +22,7 @@ class Z3WrapperTest(unittest.TestCase):
 
         query = os_parser.parse_query(thy, """
         query testStructEqual {
-            fixes a: struct A;
+            fixes a: A;
             shows a == A {{ x: a.x, y: a.y }}
         }
         """)
@@ -38,7 +38,7 @@ class Z3WrapperTest(unittest.TestCase):
 
         query = """
         query testStructVal {
-            fixes a: struct A;
+            fixes a: A;
             assumes a == A {{ x: 1, y: 2}};
             shows a.x == 1
         }
@@ -56,8 +56,8 @@ class Z3WrapperTest(unittest.TestCase):
 
         query = """
         query testStructUpdate {
-            fixes a: struct A;
-            fixes b: struct A;
+            fixes a: A;
+            fixes b: A;
             assumes b == a{ x := 1 };
             shows b.x == 1 && b.y == a.y
         }
@@ -202,11 +202,15 @@ class Z3WrapperTest(unittest.TestCase):
         """
         thy.add_datatype(os_parser.parse_datatype(thy, datatype))
 
+        axiom_func = """
+        axiomfunc h: A -> A
+        """
+        thy.add_axiom_func(os_parser.parse_axiomfunc(thy, axiom_func))
+
         query = """
         query testDatatypeEqual6 {
             fixes a: A;
             fixes b: A;
-            fixes h: A -> A;
             assumes switch (a) {
                 case f(u):
                     switch (b) {

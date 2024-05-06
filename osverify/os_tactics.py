@@ -5,7 +5,7 @@ from osverify import os_struct
 from osverify import os_theory
 from osverify import os_query
 from osverify import os_term
-from osverify.os_term import OSTerm
+from osverify.os_term import OSTerm, OSVar
 from osverify import os_match
 from osverify.os_util import indent
 from osverify import os_simplify
@@ -14,8 +14,9 @@ from osverify import os_model
 
 class AbstractProofState:
     """Base class of proof states."""
-    def __len__(self):
-        raise NotImplementedError("__len__: %s" % type(self))
+    def num_unsolved(self) -> int:
+        """Return the number of unsolved subgoals."""
+        raise NotImplementedError("num_unsolved: %s" % type(self))
 
 class EmptyProofState(AbstractProofState):
     """Corresponds to a proof state that is already resolved."""
@@ -25,7 +26,7 @@ class EmptyProofState(AbstractProofState):
     def __str__(self):
         return "()"
     
-    def __len__(self):
+    def num_unsolved(self) -> int:
         return 0
 
 class CaseProofState(AbstractProofState):
@@ -36,15 +37,20 @@ class CaseProofState(AbstractProofState):
     constructor are new names that can appear in the corresponding
     proof state.
 
+    Attributes
+    ----------
+    cases : Tuple[Tuple[str, Tuple[OSVar], AbstractProofState]]
+        list of cases, each case is a triple (constr_name, params, state)
+
     """
-    def __init__(self, cases: Iterable[Tuple[str, Tuple[os_term.OSVar], AbstractProofState]]):
-        self.cases = cases
+    def __init__(self, cases: Iterable[Tuple[str, Tuple[OSVar], AbstractProofState]]):
+        self.cases = tuple(cases)
 
     def __str__(self):
         res = ""
         first = True
         for constr_name, params, state in self.cases:
-            if len(state) > 0:
+            if state.num_unsolved() > 0:
                 if not first:
                     res += "\n"
                 res += constr_name
@@ -56,27 +62,31 @@ class CaseProofState(AbstractProofState):
                 first = False
         return res
     
-    def __len__(self):
+    def num_unsolved(self) -> int:
         res = 0
         for _, _, state in self.cases:
-            res += len(state)
+            res += state.num_unsolved()
         return res
 
 class IndexProofState(AbstractProofState):
     """Corresponding to proof states distinguished by index.
     
-    The cases are distinguished by index. While we store the proof states
-    in a list, the cases are 1-based.
+    The cases are distinguished by an 1-based integer index.
+
+    Attributes
+    ----------
+    cases : Tuple[AbstractProofState]
+        list of cases, with indices starting at 1    
 
     """
     def __init__(self, cases: Iterable[AbstractProofState]):
-        self.cases = cases
+        self.cases = tuple(cases)
 
     def __str__(self):
         res = ""
         first = True
         for i, state in enumerate(self.cases):
-            if len(state) > 0:
+            if state.num_unsolved() > 0:
                 if not first:
                     res += "\n"
                 res += "%s: {\n" % (i + 1)
@@ -85,15 +95,31 @@ class IndexProofState(AbstractProofState):
                 first = False
         return res
     
-    def __len__(self):
+    def num_unsolved(self) -> int:
         res = 0
         for state in self.cases:
-            res += len(state)
+            res += state.num_unsolved()
         return res
 
 class AssertProofState(AbstractProofState):
-    """Proving and then using an assertion."""
-    def __init__(self, assert_prop: OSTerm, assert_case: AbstractProofState, remain_case: AbstractProofState):
+    """Proving and then using an assertion.
+
+    This construct split the proof into two parts: first for asserting some
+    proposition, and second for making use of that proposition (for example
+    by putting it among the assumptions, but there are other possibilities).
+
+    Attributes
+    ----------
+    assert_prop : OSTerm
+        proposition to be asserted
+    assert_case : AbstractProofState
+        proof state for showing the asserted proposition
+    remain_case : AbstractProofState
+        proof state assuming the asserted proposition
+
+    """
+    def __init__(self, assert_prop: OSTerm, assert_case: AbstractProofState,
+                 remain_case: AbstractProofState):
         self.assert_prop = assert_prop
         self.assert_case = assert_case
         self.remain_case = remain_case
@@ -101,19 +127,19 @@ class AssertProofState(AbstractProofState):
     def __str__(self):
         res = ""
         first = True
-        if len(self.assert_case) > 0:
+        if self.assert_case.num_unsolved() > 0:
             res += "assert %s: {" % self.assert_prop
             res += indent(str(self.assert_case)) + "\n"
             res += "}"
             first = False
-        if len(self.remain_case) > 0:
+        if self.remain_case.num_unsolved() > 0:
             if not first:
                 res += "\n"
             res += str(self.remain_case)
         return res
     
-    def __len__(self):
-        return len(self.assert_case) + len(self.remain_case)
+    def num_unsolved(self) -> int:
+        return self.assert_case.num_unsolved() + self.remain_case.num_unsolved()
 
 class ProofState(AbstractProofState):
     """Represents the intermediate state during a proof.
@@ -139,7 +165,7 @@ class ProofState(AbstractProofState):
     
     """
     def __init__(self, type_params: Iterable[str],
-                 fixes: Iterable[os_term.OSVar],
+                 fixes: Iterable[OSVar],
                  assumes: Iterable[Tuple[str, OSTerm]],
                  concl: OSTerm):
         self.type_params = tuple(type_params)
@@ -163,7 +189,7 @@ class ProofState(AbstractProofState):
         res += "prove %s" % self.concl
         return res
     
-    def __len__(self):
+    def num_unsolved(self) -> int:
         return 1
     
     def __eq__(self, other):
@@ -390,10 +416,16 @@ class Auto(Tactic):
         if isinstance(res, os_z3wrapper.UnsatResult):
             return EmptyProofState()
         elif isinstance(res, os_z3wrapper.ModelResult):
-            print(res.model)
-            model = os_z3wrapper.convert_model(thy, state.fixes, res.model)
+            print('--- When proving ---')
+            print(state.concl)
+            model = os_z3wrapper.convert_model(thy, state.type_params, state.fixes, res.model, verbose=True)
+            print("--- Converted model ---")
             print(model)
             os_model.diagnose_query(thy, [assume for _, assume in state.assumes], state.concl, model)
+            print("--- list of abstract functions ---")
+            for func, ty in res.funcs:
+                print("%s: %s" % (func, ty))
+            # os_z3wrapper.diagnose_diff(thy, state.concl, res.model, res.ctxt, model)
             raise TacticException("Z3 is unable to prove goal")
         else:
             raise TacticException("Z3 is unable to prove goal")
@@ -414,52 +446,111 @@ class Simplify(Tactic):
             os_simplify.simplify(thy, state.concl)
         )
 
+class Exists(Tactic):
+    """Supply witness to existence goal by hand.
+    
+    """
+    def __init__(self, exprs: Iterable[OSTerm]):
+        self.exprs = exprs
+
+    def exec(self, thy: os_theory.OSTheory, state: AbstractProofState) -> AbstractProofState:
+        if not isinstance(state, ProofState):
+            raise TacticException("exists: not applied to singleton")
+
+        # Extract existential variable and body statement
+        vars, body = os_term.strip_exists(state.concl)
+
+        inst = dict()
+        for var, expr in zip(vars, self.exprs):
+            if var.type != expr.type:
+                raise TacticException("exists: wrong type for variable %s. Expected %s, got %s" % (
+                    var.name, var.type, expr.type))
+            inst[var.name] = expr
+        
+        body_inst = body.subst(inst)
+        new_cases = list()
+        shows = os_term.split_conj(body_inst)
+        for show in shows:
+            # Form the goal
+            new_cases.append(ProofState(
+                type_params=state.type_params,
+                fixes=state.fixes,
+                assumes=state.assumes,
+                concl=show
+            ))
+
+        return IndexProofState(new_cases)
+
 class Skolemize(Tactic):
     """Skolemize quantifiers.
     
-    Existential quantifiers in the assumptions and universal quantifiers
-    in the conclusion are converted into fixed variables.
+    Existential quantifiers in given assumption are converted into fixed
+    variables. Both name of the assumption and new names for the variables
+    must be provided.
     
     """
-    def __init__(self):
-        pass
+    def __init__(self, name: str, vars: Iterable[OSVar]):
+        self.name = name
+        self.vars = vars
 
     def exec(self, thy: os_theory.OSTheory, state: AbstractProofState) -> AbstractProofState:
         if not isinstance(state, ProofState):
             raise TacticException("skolemize: not applied to singleton")
 
         # Obtain list of existing variable names
-        names = set(state.fixes_map.keys())
+        fixes_names = set(state.fixes_map.keys())
 
         # List of new variables, from existential quantifiers in assumptions
         # and universal quantifiers in the conclusion
         new_fixes = list()
         assumes = list()
         for name, assume in state.assumes:
-            vars, body = os_term.strip_exists(assume)
-            for var in vars:
-                variant = os_util.variant_names(names, var.name)
-                new_fixes.append(os_term.OSVar(variant, type=var.type))
-                names.add(variant)
-            assumes.append((name, body))
-
-        # Form the new conclusion
-        vars, body = os_term.strip_forall(state.concl)
-        for var in vars:
-            variant = os_util.variant_names(names, var.name)
-            new_fixes.append(os_term.OSVar(variant, type=var.type))
-            names.add(variant)
+            if name == self.name:
+                vars, body = os_term.strip_exists(assume)
+                if len(vars) != len(self.vars):
+                    raise TacticException("skolemize: expected %s variable names, provided %s." % (
+                        len(vars), len(self.vars)
+                    ))
+                inst = dict()
+                for var, new_var in zip(vars, self.vars):
+                    if new_var.name in fixes_names:
+                        raise TacticException("skolemize: variable %s already exists" % new_var.name)
+                    if var.type != new_var.type:
+                        raise TacticException("skolemize: wrong type for variable %s. Expected %s, got %s" % (
+                            var, var.type, new_var.type
+                        ))
+                    inst[var.name] = new_var
+                    new_fixes.append(new_var)
+                    fixes_names.add(new_var.name)
+                assumes.append((name, body.subst(inst)))
+            else:
+                assumes.append((name, assume))
 
         return ProofState(
             type_params=state.type_params,
             fixes=tuple(list(state.fixes) + new_fixes),
             assumes=assumes,
-            concl=body
+            concl=state.concl
         )
 
 
 class Assert(Tactic):
-    """Assert new fact with proof."""
+    """Assert new fact with proof.
+
+    This tactic creates an AssertProofState, where the assert case is for
+    showing the asserted fact, and the remaining case is formed by adding
+    the asserted fact as an assumption.
+    
+    Attributes
+    ----------
+    name : str
+        name of the fact to be introduced.
+    expr : OSTerm
+        statement of the fact.
+    tactic : Tactic
+        tactic used to prove the fact.
+
+    """
     def __init__(self, name: str, expr: OSTerm, tactic: Tactic):
         self.name = name
         self.expr = expr
@@ -486,6 +577,51 @@ class Assert(Tactic):
             fixes=state.fixes,
             assumes=state.assumes + ((self.name, self.expr),),
             concl=state.concl
+        )
+        return AssertProofState(self.expr, assert_state2, remain_state)
+
+class Change(Tactic):
+    """Rewrite the goal using an asserted equality.
+    
+    This tactic creates an AssertProofState, where the assert case is for
+    showing the equality, and the remaining case is formed by rewriting the
+    goal using the equality.
+
+    Attributes
+    ----------
+    expr : OSTerm
+        statement of the equality.
+    tactic : Tactic
+        tactic used for proving the equality.
+
+    """
+    def __init__(self, expr: OSTerm, tactic: Tactic):
+        self.expr = expr
+        if not os_term.is_eq(self.expr):
+            raise AssertionError("change: input expression is not equality")
+        self.tactic = tactic
+
+    def exec(self, thy: os_theory.OSTheory, state: AbstractProofState) -> AbstractProofState:
+        if not isinstance(state, ProofState):
+            raise TacticException("change: not applied to singleton")
+
+        # First prove assertion
+        assert_state = ProofState(
+            type_params=state.type_params,
+            fixes=state.fixes,
+            assumes=state.assumes,
+            concl=self.expr
+        )
+        assert_state2 = self.tactic.exec(thy, assert_state)
+
+        # Now rewrite using the new equality
+        concl = state.concl.apply_subterm(
+            lambda t: os_simplify.rewrite(thy, self.expr, t))
+        remain_state = ProofState(
+            type_params=state.type_params,
+            fixes=state.fixes,
+            assumes=state.assumes,
+            concl=concl            
         )
         return AssertProofState(self.expr, assert_state2, remain_state)
 
@@ -583,7 +719,7 @@ class MatchShow(Tactic):
         # Replace variables by schematic variables
         inst = dict()
         for var in vars:
-            inst[var.name] = os_term.OSVar("?" + var.name, type=var.type)
+            inst[var.name] = OSVar("?" + var.name, type=var.type)
         body = body.subst(inst)
         body_pats = os_term.split_conj(body)
 
@@ -649,7 +785,10 @@ class ApplyTheorem(Tactic):
     def __init__(self, param: ApplyParam):
         self.param = param
 
-    def exec(self, thy: os_theory.OSTheory, state: ProofState) -> List[ProofState]:
+    def exec(self, thy: os_theory.OSTheory, state: AbstractProofState) -> AbstractProofState:
+        if not isinstance(state, ProofState):
+            raise TacticException("ApplyTheorem: not applied to singleton")
+
         if self.param.thm_name in thy.theorems:
             thm = thy.get_sch_theorem(self.param.thm_name)
             assumes, concl = os_term.strip_implies(thm)
@@ -665,7 +804,7 @@ class ApplyTheorem(Tactic):
             # Replace variables by schematic variables
             inst = dict()
             for var in vars:
-                inst[var.name] = os_term.OSVar("?" + var.name, type=var.type)
+                inst[var.name] = OSVar("?" + var.name, type=var.type)
             body = body.subst(inst)
             assumes, concl = os_term.strip_implies(body)
         else:
@@ -737,7 +876,7 @@ class DefineVar(Tactic):
         if not isinstance(state, ProofState):
             raise TacticException("DefineVar: not applied to singleton")
 
-        new_var = os_term.OSVar(self.var_name, type=self.expr.type)
+        new_var = OSVar(self.var_name, type=self.expr.type)
 
         def replace_term(expr: OSTerm) -> OSTerm:
             return new_var if expr == self.expr else expr
@@ -815,7 +954,7 @@ class Cases(Tactic):
         if not isinstance(state, ProofState):
             raise TacticException("Cases: not applied to singleton")
 
-        if isinstance(self.expr, os_term.OSVar):
+        if isinstance(self.expr, OSVar):
             # Expression is already a variable
             var_name = self.expr.name
         else:
@@ -857,14 +996,14 @@ class Cases(Tactic):
                 # Use parameter names provided in cases
                 case = self.cases_map[constr_name]
                 for case_param, (_, param_type) in zip(case.params, branch.params):
-                    arg_list.append(os_term.OSVar(case_param, type=param_type.subst(type_inst)))
+                    arg_list.append(OSVar(case_param, type=param_type.subst(type_inst)))
             else:
                 # Create fresh names
                 names = set(state.fixes_map.keys())
                 for param_name, param_type in branch.params:
                     new_name = os_util.variant_names(names, param_name)
                     names.add(new_name)
-                    arg_list.append(os_term.OSVar(new_name, type=param_type.subst(type_inst)))
+                    arg_list.append(OSVar(new_name, type=param_type.subst(type_inst)))
             fixes.extend(arg_list)
 
             # For each existing assumption, make the corresponding assumption
@@ -958,7 +1097,10 @@ class Induction(Tactic):
         return "Induction(%s, [%s])" % (
             self.param, ", ".join(str(case) for case in self.cases))
 
-    def exec(self, thy: os_theory.OSTheory, state: ProofState) -> List[ProofState]:
+    def exec(self, thy: os_theory.OSTheory, state: AbstractProofState) -> AbstractProofState:
+        if not isinstance(state, ProofState):
+            raise TacticException("induction: not applied to singleton")
+
         # Type of the induction variable
         var_name = self.param.induct_var
         if var_name not in state.fixes_map:
@@ -990,19 +1132,19 @@ class Induction(Tactic):
                 if fix.name != var_name:
                     fixes.append(fix)
 
-            arg_list: List[os_term.OSVar] = list()
+            arg_list: List[OSVar] = list()
             if constr_name in self.cases_map:
                 # Use parameter names provided in cases
                 case = self.cases_map[constr_name]
                 for case_param, (_, param_type) in zip(case.params, branch.params):
-                    arg_list.append(os_term.OSVar(case_param, type=param_type.subst(type_inst)))
+                    arg_list.append(OSVar(case_param, type=param_type.subst(type_inst)))
             else:
                 # Create fresh names
                 names = set(state.fixes_map.keys())
                 for param_name, param_type in branch.params:
                     new_name = os_util.variant_names(names, param_name)
                     names.add(new_name)
-                    arg_list.append(os_term.OSVar(new_name, type=param_type.subst(type_inst)))
+                    arg_list.append(OSVar(new_name, type=param_type.subst(type_inst)))
             fixes.extend(arg_list)
 
             # For each existing assumption, make the corresponding assumption
@@ -1018,7 +1160,7 @@ class Induction(Tactic):
             for arg in arg_list:
                 if os_theory.equal_type(thy, arg.type.subst(type_inst), var_type):
                     inst = dict()
-                    inst[var_name] = os_term.OSVar(arg.name, type=arg.type.subst(type_inst))
+                    inst[var_name] = OSVar(arg.name, type=arg.type.subst(type_inst))
                     ind_assumes = list()
                     for name, assume in state.assumes:
                         if assume.has_var(var_name) or \
@@ -1029,7 +1171,7 @@ class Induction(Tactic):
                     for arbitrary in reversed(self.param.arbitraries):
                         if arbitrary not in state.fixes_map:
                             raise AssertionError("arbitrary variable %s not found" % arbitrary)
-                        decls.append(os_term.OSVar(arbitrary, type=state.fixes_map[arbitrary]))
+                        decls.append(OSVar(arbitrary, type=state.fixes_map[arbitrary]))
                     if decls:
                         ind_prop = os_term.OSQuant("forall", decls, ind_prop)
                     assumes.append(("IH_" + arg.name, ind_prop))
@@ -1092,7 +1234,8 @@ def check_proof(thy: os_theory.OSTheory, query: os_query.Query):
         state = init_proof_state(query, i)
         proof: Tactic = show.proof
         state = proof.exec(thy, state)
-        if len(state) != 0:
+        if state.num_unsolved() != 0:
             print("Subgoals remaining:")
             print(state)
-            raise AssertionError("check_proof: %s subgoals remaining" % len(state))
+            raise AssertionError(
+                "check_proof: %s subgoals remaining" % state.num_unsolved())

@@ -67,6 +67,19 @@ predicate inlist<T>(T x, List<T> xs) {
     }
 }
 
+// Remove value from a list
+function list_remove<T>(T x, List<T> xs) -> List<T> {
+    switch (xs) {
+        case nil: nil;
+        case cons(y, xs2):
+            if (x == y) {
+                list_remove(x, xs2)
+            } else {
+                cons(y, list_remove(x, xs2))
+            };
+    }
+}
+
 // Maximum values for various word sizes
 consts {
     int32u_MAX = 255;

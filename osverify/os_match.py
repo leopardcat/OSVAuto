@@ -120,5 +120,33 @@ def match(thy: OSTheory, pat: OSTerm, t: OSTerm,
         if not match(thy, pat2, t.body, tyinst, inst):
             return False
         return True
+    elif isinstance(pat, os_term.OSQuantIn):
+        if not isinstance(t, os_term.OSQuantIn):
+            return False
+        if pat.quantifier != t.quantifier:
+            return False
+        if not match(thy, pat.collection, t.collection, tyinst, inst):
+            return False
+
+        # Rename pat.param into t.param
+        param_inst = dict()
+        param_inst[pat.param.name] = t.param
+        pat2 = pat.body.subst(param_inst)
+        if not match(thy, pat2, t.body, tyinst, inst):
+            return False
+        return True
+    elif isinstance(pat, os_term.OSStructUpdate):
+        if not isinstance(t, os_term.OSStructUpdate):
+            return False
+        if not match(thy, pat.ori_expr, t.ori_expr, tyinst, inst):
+            return False
+        if len(pat.dict_updates) != len(t.dict_updates):
+            return False
+        for field in pat.dict_updates:
+            if field not in t.dict_updates:
+                return False
+            if not match(thy, pat.dict_updates[field], t.dict_updates[field], tyinst, inst):
+                return False
+        return True
     else:
         raise NotImplementedError("match: %s" % pat)

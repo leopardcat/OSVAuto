@@ -8,6 +8,27 @@ from osverify import os_struct
 from osverify.os_struct import OSType
 from osverify.os_util import indent, variant_names
 
+
+"""
+Flag for checking type is initialized during term construction.
+
+During parsing, it is not necessary to provide types for all terms
+(they will be filled in by type inference), so usually this flag is
+left at False. Set this flag to True to enable this check, for example
+when constructing models from SMT counterexamples.
+
+"""
+CHECK_INIT_TYPE = False
+
+
+class OSTermException(Exception):
+    def __init__(self, msg: str):
+        self.msg = msg
+
+    def __str__(self):
+        return self.msg
+
+
 class OSTerm:
     """Base class for terms."""
     # Any term has a type
@@ -34,6 +55,10 @@ class OSTerm:
         """Assert the given term is fully type-checked."""
         raise NotImplementedError("assert_type_checked: %s" % type(self))
     
+    def assert_init_type(self):
+        if CHECK_INIT_TYPE and self.type is None:
+            raise AssertionError("When building %s, need to provide type" % self)
+
     def get_vars_inplace(self, ty_vars: List[str], vars: List["OSVar"]):
         """Add set of variables into vars."""
         raise NotImplementedError("get_vars_inplace: %s" % type(self))
@@ -66,11 +91,11 @@ class OSTerm:
         _, vars = self.get_vars()
         return any(var.is_sch_var() for var in vars)
     
-    def get_funcs_inplace(self, funcs: List[str]):
+    def get_funcs_inplace(self, funcs: List[Tuple[str, OSType]]):
         """Return the set of functions appearing in the term."""
         raise NotImplementedError("get_func_inplace: %s" % type(self))
     
-    def get_funcs(self) -> Tuple[str]:
+    def get_funcs(self) -> Tuple[Tuple[str, OSType]]:
         """Obtain the set of functions appearing in the term."""
         funcs = list()
         self.get_funcs_inplace(funcs)
@@ -131,6 +156,7 @@ class OSWildcard(OSTerm):
     """
     def __init__(self, *, type: Optional[OSType] = None):
         self.type = type
+        self.assert_init_type()
 
     def priority(self):
         return 100
@@ -160,7 +186,53 @@ class OSWildcard(OSTerm):
         if self.type:
             self.type.get_vars_inplace(ty_vars)
 
-    def get_funcs_inplace(self, funcs: List[str]):
+    def get_funcs_inplace(self, funcs: List[Tuple[str, OSType]]):
+        pass
+
+    def apply_subterm(self, f: Callable[[OSTerm], OSTerm]) -> OSTerm:
+        return f(self)
+
+class OSUnknown(OSTerm):
+    """Unknown term.
+    
+    This is used to represent some part of the term has unknown value,
+    written as "?". It is used, for example, during reconstruction of
+    SMT counterexamples, where some term has no value in the model.
+
+    """
+    def __init__(self, *, type: Optional[OSType] = None):
+        self.type = type
+        self.assert_init_type()
+
+    def priority(self):
+        return 100
+    
+    def __eq__(self, other):
+        return isinstance(other, OSUnknown) and self.type == other.type
+
+    def __str__(self):
+        return "?"
+    
+    def __repr__(self):
+        return "OSUnknown(%s)" % self.type
+
+    def __hash__(self):
+        return hash(("OSUnknown", self.type))
+
+    def subst(self, inst: Dict[str, OSTerm]) -> OSTerm:
+        return self
+    
+    def subst_type(self, tyinst: Dict[str, OSType]) -> OSTerm:
+        return OSUnknown(type=self.type.subst(tyinst))
+
+    def assert_type_checked(self):
+        assert self.type is not None, "assert_type_checked: failed on %s" % self
+
+    def get_vars_inplace(self, ty_vars: List[str], vars: List["OSVar"]):
+        if self.type:
+            self.type.get_vars_inplace(ty_vars)
+
+    def get_funcs_inplace(self, funcs: List[Tuple[str, OSType]]):
         pass
 
     def apply_subterm(self, f: Callable[[OSTerm], OSTerm]) -> OSTerm:
@@ -176,6 +248,7 @@ class OSVar(OSTerm):
     def __init__(self, name: str, *, type: Optional[OSType] = None):
         self.name = name
         self.type = type
+        self.assert_init_type()
 
     def priority(self):
         return 100
@@ -219,7 +292,7 @@ class OSVar(OSTerm):
         if self not in vars:
             vars.append(self)
 
-    def get_funcs_inplace(self, funcs: List[str]):
+    def get_funcs_inplace(self, funcs: List[Tuple[str, OSType]]):
         pass
 
     def apply_subterm(self, f: Callable[[OSTerm], OSTerm]) -> OSTerm:
@@ -236,6 +309,7 @@ class OSConst(OSTerm):
     def __init__(self, name: str, *, type: Optional[OSType] = None):
         self.name = name
         self.type = type
+        self.assert_init_type()
 
     def priority(self):
         return 100
@@ -265,7 +339,7 @@ class OSConst(OSTerm):
         if self.type:
             self.type.get_vars_inplace(ty_vars)
 
-    def get_funcs_inplace(self, funcs: List[str]):
+    def get_funcs_inplace(self, funcs: List[Tuple[str, OSType]]):
         pass
 
     def apply_subterm(self, f: Callable[[OSTerm], OSTerm]) -> OSTerm:
@@ -291,6 +365,7 @@ class OSNumber(OSTerm):
         self.type = type
         if isinstance(self.val, bool):
             self.type = os_struct.Bool
+        self.assert_init_type()
 
     def priority(self):
         return 100
@@ -326,7 +401,7 @@ class OSNumber(OSTerm):
         if self.type:
             self.type.get_vars_inplace(ty_vars)
 
-    def get_funcs_inplace(self, funcs: List[str]):
+    def get_funcs_inplace(self, funcs: List[Tuple[str, OSType]]):
         pass
 
     def apply_subterm(self, f: Callable[[OSTerm], OSTerm]) -> OSTerm:
@@ -365,6 +440,7 @@ class OSOp(OSTerm):
         self.op = op
         self.args = tuple(args)
         self.type = type
+        self.assert_init_type()
 
     def priority(self):
         if len(self.args) == 1:
@@ -435,7 +511,7 @@ class OSOp(OSTerm):
         for arg in self.args:
             arg.get_vars_inplace(ty_vars, vars)
 
-    def get_funcs_inplace(self, funcs: List[str]):
+    def get_funcs_inplace(self, funcs: List[Tuple[str, OSType]]):
         # Currently we do not consider operators to be functions
         for arg in self.args:
             arg.get_funcs_inplace(funcs)
@@ -449,11 +525,11 @@ class OSFun(OSTerm):
     
     Some functions have special syntax:
 
-    pair(t1, t2) is written as (t1, t2)
     ite(cond, t1, t2) is written as if (cond) { t1 } else { t2 }
+    pair(t1, t2) is written as (t1, t2)
     nth(a, i) is written as a[i]
     Store(a, i, v) is written as a[i := v]
-    join is axiomatic function
+    literal maps and lists are printed in corresponding syntax
 
     """
     def __init__(self, func_name: str, *args: OSTerm, type: Optional[OSType] = None):
@@ -461,6 +537,7 @@ class OSFun(OSTerm):
         self.args = tuple(args)
         assert all(isinstance(arg, OSTerm) for arg in self.args)
         self.type = type
+        self.assert_init_type()
 
     def priority(self):
         return 100
@@ -470,9 +547,7 @@ class OSFun(OSTerm):
             self.args == other.args and self.type == other.type
 
     def __str__(self):
-        if len(self.args) == 0:
-            return self.func_name
-        elif self.func_name == "ite":
+        if self.func_name == "ite":
             res = "if (%s) {\n" % self.args[0]
             res += indent(str(self.args[1])) + "\n"
             res += "} else {\n"
@@ -488,7 +563,29 @@ class OSFun(OSTerm):
         elif self.func_name == 'emptyMap':
             return "{}"
         elif self.func_name == 'updateMap':
-            return "%s[%s := %s]" % (self.args[2], self.args[0], self.args[1])
+            # If the term is a literal map (as detected by strip_map), print
+            # it as a literal map. Otherwise print in update form.
+            try:
+                map = strip_map(self)
+                res = "{\n"
+                for k, v in map.items():
+                    res += "    %s: %s,\n" % (k, v)
+                res += "}"
+                return res
+            except OSTermException:
+                return "updateMap(%s, %s, %s)" % (self.args[0], self.args[1], self.args[2])
+        elif self.func_name == 'nil':
+            return "[]"
+        elif self.func_name == 'cons':
+            # If the term is a literal list (as detected by strip_list), print
+            # it as a literal list. Otherwise print in cons form.
+            try:
+                lst = strip_list(self)
+                return "[%s]" % (", ".join(str(t) for t in lst))
+            except OSTermException:
+                return "cons(%s, %s)" % (self.args[0], self.args[1])
+        elif len(self.args) == 0:
+            return self.func_name
         else:
             return "%s(%s)" % (self.func_name, ", ".join(str(arg) for arg in self.args))
         
@@ -520,9 +617,14 @@ class OSFun(OSTerm):
         for arg in self.args:
             arg.get_vars_inplace(ty_vars, vars)
 
-    def get_funcs_inplace(self, funcs: List[str]):
-        if self.func_name not in funcs:
-            funcs.append(self.func_name)
+    def get_funcs_inplace(self, funcs: List[Tuple[str, OSType]]):
+        if len(self.args) == 0:
+            func = (self.func_name, self.type)
+        else:
+            arg_types = [arg.type for arg in self.args]
+            func = (self.func_name, os_struct.OSFunctionType(*(arg_types + [self.type])))
+        if func not in funcs:
+            funcs.append(func)
         for arg in self.args:
             arg.get_funcs_inplace(funcs)
 
@@ -548,6 +650,7 @@ class FieldGet(OSTerm):
         self.expr = expr
         self.field = field
         self.type = type
+        self.assert_init_type()
 
     def priority(self):
         return 100
@@ -579,7 +682,7 @@ class FieldGet(OSTerm):
             self.type.get_vars_inplace(ty_vars)
         self.expr.get_vars_inplace(ty_vars, vars)
 
-    def get_funcs_inplace(self, funcs: List[str]):
+    def get_funcs_inplace(self, funcs: List[Tuple[str, OSType]]):
         self.expr.get_funcs_inplace(funcs)
 
     def apply_subterm(self, f: Callable[[OSTerm], OSTerm]) -> OSTerm:
@@ -639,6 +742,8 @@ class OSStructUpdate(OSTerm):
             assert update.field_name not in self.dict_updates, \
                 "OSStructUpdate: duplicate field name %s" % update.field_name
             self.dict_updates[update.field_name] = update.expr
+
+        self.assert_init_type()
     
     def priority(self):
         return 100
@@ -674,7 +779,7 @@ class OSStructUpdate(OSTerm):
         for update in self.updates:
             update.expr.get_vars_inplace(ty_vars, vars)
 
-    def get_funcs_inplace(self, funcs: List[str]):
+    def get_funcs_inplace(self, funcs: List[Tuple[str, OSType]]):
         self.ori_expr.get_funcs_inplace(funcs)
         for update in self.updates:
             update.expr.get_funcs_inplace(funcs)
@@ -708,6 +813,7 @@ class OSStructVal(OSTerm):
         for field, val in self.vals:
             self.dict_vals[field] = val
         self.type = os_struct.OSStructType(struct_name)
+        self.assert_init_type()
 
     def priority(self):
         return 100
@@ -742,7 +848,7 @@ class OSStructVal(OSTerm):
         for _, val in self.vals:
             val.get_vars_inplace(ty_vars, vars)
 
-    def get_funcs_inplace(self, funcs: List[str]):
+    def get_funcs_inplace(self, funcs: List[Tuple[str, OSType]]):
         for _, val in self.vals:
             val.get_funcs_inplace(funcs)
 
@@ -771,6 +877,7 @@ class OSLet(OSTerm):
         self.expr = expr
         self.rhs = rhs
         self.type = self.rhs.type
+        self.assert_init_type()
 
     def priority(self):
         return 10
@@ -793,9 +900,29 @@ class OSLet(OSTerm):
         return hash(("OSLet", self.var_name, self.expr, self.rhs))
 
     def subst(self, inst: Dict[str, OSTerm]) -> OSTerm:
-        if self.var_name in inst:
-            raise AssertionError("subst: capture of bound variable %s" % self.var_name)
-        return OSLet(self.var_name, self.expr.subst(inst), self.rhs.subst(inst))
+        # Make a new copy as inst is modified
+        inst2 = dict(inst)
+
+        # Bound variables are never substituted
+        if self.var_name in inst2:
+            del inst2[self.var_name]
+
+        # Moreover, if any of the substituted values contain variables
+        # that conflict with the bound variables, rename the bound variables
+        ty_vars: List[str] = list()
+        vars: List[OSVar] = list()
+        for _, t in inst2.items():
+            t.get_vars_inplace(ty_vars, vars)
+        vars: Set[OSVar] = set([var.name for var in vars])
+        new_params = list()
+        body_inst = dict()
+        new_name = variant_names(vars, self.var_name)
+        new_var = OSVar(new_name, type=self.expr.type)
+        new_params.append(new_var)
+        vars.add(new_name)
+        if new_name != self.var_name:
+            body_inst[self.var_name] = new_var
+        return OSLet(new_name, self.expr.subst(inst2), self.rhs.subst(body_inst).subst(inst2))
     
     def subst_type(self, tyinst: Dict[str, OSType]) -> OSType:
         return OSLet(self.var_name, self.expr.subst_type(tyinst), self.rhs.subst(tyinst))
@@ -818,7 +945,7 @@ class OSLet(OSTerm):
             if rhs_var.name != self.var_name and rhs_var not in vars:
                 vars.append(rhs_var)
 
-    def get_funcs_inplace(self, funcs: List[str]):
+    def get_funcs_inplace(self, funcs: List[Tuple[str, OSType]]):
         self.expr.get_funcs_inplace(funcs)
         self.rhs.get_funcs_inplace(funcs)
 
@@ -843,7 +970,7 @@ class OSSwitchBranch:
     def get_vars_inplace(self, ty_vars: List[str], vars: List[OSVar]):
         raise NotImplementedError
     
-    def get_funcs_inplace(self, funcs: List[str]):
+    def get_funcs_inplace(self, funcs: List[Tuple[str, OSType]]):
         raise NotImplementedError
     
     def apply_subterm(self, f: Callable[[OSTerm], OSTerm]) -> "OSSwitchBranch":
@@ -930,7 +1057,7 @@ class OSSwitchBranchCase(OSSwitchBranch):
             if expr_var not in bound_vars and expr_var not in vars:
                 vars.append(expr_var)
 
-    def get_funcs_inplace(self, funcs: List[str]):
+    def get_funcs_inplace(self, funcs: List[Tuple[str, OSType]]):
         # We do not consider datatype constructors in the pattern to be
         # function calls.
         self.expr.get_funcs_inplace(funcs)
@@ -978,7 +1105,7 @@ class OSSwitchBranchDefault(OSSwitchBranch):
     def get_vars_inplace(self, ty_vars: List[str], vars: List[OSVar]):
         self.expr.get_vars_inplace(ty_vars, vars)
 
-    def get_funcs_inplace(self, funcs: List[str]):
+    def get_funcs_inplace(self, funcs: List[Tuple[str, OSType]]):
         self.expr.get_funcs_inplace(funcs)
 
     def apply_subterm(self, f: Callable[[OSTerm], OSTerm]) -> OSSwitchBranch:
@@ -1011,6 +1138,7 @@ class OSSwitch(OSTerm):
         self.switch_expr = switch_expr
         self.branches = tuple(branches)
         self.type = type
+        self.assert_init_type()
 
     def __str__(self):
         res = "switch (%s) {\n" % self.switch_expr
@@ -1052,7 +1180,7 @@ class OSSwitch(OSTerm):
         for branch in self.branches:
             branch.get_vars_inplace(ty_vars, vars)
 
-    def get_funcs_inplace(self, funcs: List[str]):
+    def get_funcs_inplace(self, funcs: List[Tuple[str, OSType]]):
         self.switch_expr.get_funcs_inplace(funcs)
         for branch in self.branches:
             branch.get_funcs_inplace(funcs)
@@ -1091,9 +1219,10 @@ class OSQuant(OSTerm):
         self.type = os_struct.Bool
 
     def __str__(self):
-        res = "%s (%s).\n" % (self.quantifier, ", ".join(
+        res = "%s (%s) {\n" % (self.quantifier, ", ".join(
             "%s %s" % (param.type, param.name) for param in self.params))
         res += indent(str(self.body))
+        res += "\n}"
         return res
     
     def __eq__(self, other):
@@ -1156,7 +1285,7 @@ class OSQuant(OSTerm):
             if body_var not in self.params and body_var not in vars:
                 vars.append(body_var)
 
-    def get_funcs_inplace(self, funcs: List[str]):
+    def get_funcs_inplace(self, funcs: List[Tuple[str, OSType]]):
         self.body.get_funcs_inplace(funcs)
 
     def apply_subterm(self, f: Callable[[OSTerm], OSTerm]) -> OSTerm:
@@ -1244,7 +1373,7 @@ class OSQuantIn(OSTerm):
             if body_var != self.param and body_var not in vars:
                 vars.append(body_var)
 
-    def get_funcs_inplace(self, funcs: List[str]):
+    def get_funcs_inplace(self, funcs: List[Tuple[str, OSType]]):
         self.collection.get_funcs_inplace(funcs)
         self.body.get_funcs_inplace(funcs)
 
@@ -1279,6 +1408,7 @@ def is_update_map(t: OSTerm) -> TypeGuard[OSFun]:
     return isinstance(t, OSFun) and t.func_name == "updateMap"
 
 def list_map(K: OSType, V: OSType, *pairs: Tuple[OSTerm, OSTerm]) -> OSTerm:
+    """Convert a list of pairs into literal map."""
     res = empty_map(K, V)
     for k, v in pairs:
         res = OSFun("updateMap", k, v, res, type=os_struct.MapType(K, V))
@@ -1295,7 +1425,7 @@ def strip_map(t: OSTerm) -> Dict[OSTerm, OSTerm]:
             res[k] = v
             t = rest
         else:
-            raise NotImplementedError("strip_map: %s" % t)
+            raise OSTermException("strip_map: %s" % t)
     return res
 
 def indom(k: OSTerm, map: OSTerm) -> OSTerm:
@@ -1321,8 +1451,37 @@ def strip_list(t: OSTerm) -> Tuple[OSTerm]:
             res.append(v)
             t = rest
         else:
-            raise NotImplementedError("strip_list: %s" % t)
+            raise OSTermException("strip_list: %s" % t)
     return res
+
+def strip_array(t: OSTerm) -> Tuple[OSTerm, Dict[int, OSTerm]]:
+    """Deconstruct array literal.
+    
+    Return value is a pair (default, updates), where updates is a mapping
+    from index to values.
+
+    """
+    default = None
+    res: Dict[int, OSTerm] = dict()
+
+    def helper(t):
+        nonlocal default
+        if isinstance(t, OSFun) and t.func_name == "K":
+            default = t.args[0]
+        elif isinstance(t, OSFun) and t.func_name == "Store":
+            helper(t.args[0])
+            if not isinstance(t.args[1], OSNumber):
+                raise OSTermException("strip_array: index %s" % t.args[1])
+            if isinstance(t.args[1].val, bool):
+                raise OSTermException("strip_array: index %s" % t.args[1].val)
+            res[t.args[1].val] = t.args[2]
+        else:
+            raise OSTermException("strip_array: %s" % t)
+
+    helper(t)
+    if default is None:
+        raise OSTermException("strip_array: %s" % t)
+    return default, res
 
 def integer(n: int) -> OSTerm:
     return OSNumber(n, type=os_struct.Int)
@@ -1369,6 +1528,9 @@ def list_conj(ts: Iterable[OSTerm]) -> OSTerm:
     for t in reversed(ts[:-1]):
         res = OSOp("&&", t, res, type=os_struct.Bool)
     return res
+
+def is_implies(t: OSTerm) -> TypeGuard[OSOp]:
+    return isinstance(t, OSOp) and t.op == "->"
 
 def strip_implies(t: OSTerm) -> Tuple[Tuple[OSTerm], OSTerm]:
     """Destruct implies expression.

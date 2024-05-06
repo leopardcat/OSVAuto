@@ -4,13 +4,14 @@ import unittest
 
 from osverify import os_parser
 from osverify import os_simplify
+from osverify import os_theory
 
-
-basic_thy = os_parser.load_theory("basic", verbose=False)
+def basic_thy():
+    return os_parser.load_theory("basic", verbose=False)
 
 class OSSimplifyTest(unittest.TestCase):
     def testRewrite(self):
-        thy = basic_thy
+        thy = basic_thy()
         ctxt = os_parser.parse_context(
             thy, "context { type T; fixes i : T; fixes xs : List<T>; fixes ys : List<T>; fixes zs : List<T> }"
         )
@@ -21,7 +22,7 @@ class OSSimplifyTest(unittest.TestCase):
         self.assertEqual(os_simplify.rewrite(thy, eq_th, t), t2)
         
     def testSimplify(self):
-        thy = basic_thy
+        thy = basic_thy()
         ctxt = os_parser.parse_context(
             thy, "context { type T; fixes x : T; fixes xs : List<T>; fixes ys : List<T>; fixes zs : List<T> }"
         )
@@ -55,7 +56,7 @@ class OSSimplifyTest(unittest.TestCase):
             self.assertEqual(os_simplify.simplify(thy, t), t2)
 
     def testSimplifySwitch(self):
-        thy = basic_thy
+        thy = basic_thy()
 
         # Add some simple structures and datatypes
         struct = """
@@ -139,6 +140,112 @@ class OSSimplifyTest(unittest.TestCase):
             t = os_parser.parse_term(thy, ctxt, s)
             t2 = os_parser.parse_term(thy, ctxt, s2)
             self.assertEqual(os_simplify.simplify_switch_once(thy, t), t2)
+
+    def testSimplifySwitch2(self):
+        thy = basic_thy()
+
+        datatype = """
+        datatype A = f(int32u x) | g(int32u x) | h(int32u x)
+        """
+        thy.add_datatype(os_parser.parse_datatype(thy, datatype))
+
+        struct = """
+        struct B { A a; }
+        """
+        thy.add_struct(os_parser.parse_struct(thy, struct))
+
+        ctxt = """
+        context {
+            fixes b: B
+        }
+        """
+        ctxt = os_parser.parse_context(thy, ctxt)
+
+        t = """
+        switch (b) {
+            case B{{a: a}}:
+                switch (a) {
+                    case f(x): x > 0;
+                    case g(x): x > 1;
+                    default: true;
+                };
+        }
+        """
+        t = os_parser.parse_term(thy, ctxt, t)
+        t2 = os_simplify.simplify_switch(thy, t)
+        self.assertTrue(os_theory.is_standard_switch(thy, t2))
+
+    def testSimplifySwitch3(self):
+        # In this example, we intentionally repeat the name "a" to test
+        # handling of name conflicts.
+        thy = basic_thy()
+
+        datatype = """
+        datatype A = f(int32u x) | g(int32u x) | h(int32u x)
+        """
+        thy.add_datatype(os_parser.parse_datatype(thy, datatype))
+
+        datatype = """
+        datatype A2 = m(A a, int32u t)
+        """
+        thy.add_datatype(os_parser.parse_datatype(thy, datatype))
+
+        struct = """
+        struct B { A2 a; }
+        """
+        thy.add_struct(os_parser.parse_struct(thy, struct))
+
+        ctxt = """
+        context {
+            fixes b: B
+        }
+        """
+        ctxt = os_parser.parse_context(thy, ctxt)
+
+        t = """
+        switch (b) {
+            case B{{a: a}}:
+                switch (a) {
+                    case m(f(x), _): x > 0;
+                    case m(g(x), _): x > 1;
+                    default: true;
+                };
+        }
+        """
+        t = os_parser.parse_term(thy, ctxt, t)
+        t2 = os_simplify.simplify_switch(thy, t)
+        self.assertTrue(os_theory.is_standard_switch(thy, t2))
+
+    def testSimplifySwitch4(self):
+        thy = basic_thy()
+
+        datatype = """
+        datatype stat = os_sem(int32u id) | os_time
+        """
+        thy.add_datatype(os_parser.parse_datatype(thy, datatype))
+
+        datatype = """
+        datatype status = rdy | wait(stat st)
+        """
+        thy.add_datatype(os_parser.parse_datatype(thy, datatype))
+
+        ctxt = """
+        context {
+            fixes s: status
+        }
+        """
+        ctxt = os_parser.parse_context(thy, ctxt)
+
+        t = """
+        switch (s) {
+            case rdy: true;
+            case wait(os_time): true;
+            default: false;
+        }
+        """
+        t = os_parser.parse_term(thy, ctxt, t)
+        t2 = os_simplify.simplify_switch(thy, t)
+        self.assertTrue(os_theory.is_standard_switch(thy, t2))
 
 
 if __name__ == "__main__":

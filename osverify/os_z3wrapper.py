@@ -1,6 +1,6 @@
 import importlib
 
-from typing import Dict, List, Optional, Iterable, Tuple
+from typing import Dict, List, Optional, Iterable, Set, Tuple
 from osverify import os_struct
 from osverify import os_term
 from osverify import os_query
@@ -36,6 +36,8 @@ class Z3ConvertContext:
     visited : Dict[OSTerm, z3.Z3PPObject]
         mapping from visited terms to their translations, constraints
         are not repeatedly produced for visited terms.
+    visited_type : Set[OSType]
+        set of visited types.
     constraints : List[z3.Z3PPObject]
         list of additional constraints
 
@@ -44,6 +46,7 @@ class Z3ConvertContext:
         self.c_idx = 0
         self.temp_var_map: Dict[str, OSType] = dict()
         self.visited: Dict[OSTerm, z3.Z3PPObject] = dict()
+        self.visited_type: Set[OSType] = set()
         self.constraints: List[z3.Z3PPObject] = list()
 
     def get_temp_var(self, ty: OSType) -> str:
@@ -63,9 +66,15 @@ class Z3ConvertContext:
         self.constraints.append(constraint)
 
 
+def get_z3_name(name: str, tys: Iterable[OSType]) -> str:
+    """Obtain z3 name for the given name and type parameters."""
+    if len(tys) == 0:
+        return name
+    else:
+        return "%s<%s>" % (name, ",".join(str(ty) for ty in tys))
+
 def get_Z3type(thy: os_theory.OSTheory, ty: OSType):
     """Convert OSType to Z3 type.
-    
 
     Parameters
     ----------
@@ -95,13 +104,8 @@ def get_Z3type(thy: os_theory.OSTheory, ty: OSType):
     elif isinstance(ty, os_struct.OSHLevelType):
         if ty.name in thy.typedefs:
             return get_Z3type(thy, thy.typedefs[ty.name])
-        elif ty.name in thy.structs:
-            raise AssertionError("get_Z3type: attempt to convert struct type %s" % ty.name)
         elif ty.name in thy.datatypes or ty.name in thy.axiom_types:
-            if len(ty.params) > 0:
-                return z3.DeclareSort("%s<%s>" % (ty.name, ",".join(str(param) for param in ty.params)))
-            else:
-                return z3.DeclareSort(ty.name)
+            return z3.DeclareSort(get_z3_name(ty.name, ty.params))
         else:
             raise AssertionError("get_Z3type: high-level type %s not found" % ty.name)
     elif isinstance(ty, os_struct.OSPointerType):
@@ -142,7 +146,7 @@ def convert_number(t: OSTerm, thy: os_theory.OSTheory):
         return z3.BitVecVal(t.val, get_Z3type(thy, t.type))
     else:
         raise AssertionError("convert_number: unexpected type %s" % t)
-    
+
 def convert_ufunc(func_name: str, args: Iterable[OSTerm],
                   ty: OSType, thy: os_theory.OSTheory, ctxt: Z3ConvertContext) -> z3.Z3PPObject:
     """Convert to uninterpreted function call.
@@ -152,14 +156,26 @@ def convert_ufunc(func_name: str, args: Iterable[OSTerm],
     function name, args, ty separately rather than as a single term.
 
     """
+    func_ty, ty_params = thy.get_func_type(func_name)
+    sch_func_ty = os_theory.expand_type(thy, func_ty).make_schematic(ty_params)
+    ty_inst = dict()
+    if len(args) == 0:
+        concrete_func_ty = ty
+    else:
+        arg_ty = [os_theory.expand_type(thy, arg.type) for arg in args]
+        concrete_func_ty = os_struct.OSFunctionType(*(arg_ty + [ty]))
+    assert sch_func_ty.match(concrete_func_ty, ty_inst), \
+        ("unable to match %s with %s" % (sch_func_ty, concrete_func_ty))
+    z3_func_name = get_z3_name(func_name, [ty_inst['?' + param] for param in ty_params])
+
     # If function has no arguments, convert to Z3 constant
     if len(args) == 0:
-        return z3.Const(func_name, get_Z3type(thy, ty))
+        return z3.Const(z3_func_name, get_Z3type(thy, ty))
 
     # Otherwise, convert to application of Z3 function
     args_type_list = [get_Z3type(thy, arg.type) for arg in args]
     args_list = [convert(thy, arg, ctxt) for arg in args]
-    z3_func = z3.Function(func_name, *args_type_list, get_Z3type(thy, ty))
+    z3_func = z3.Function(z3_func_name, *args_type_list, get_Z3type(thy, ty))
     return z3_func(args_list)
 
 def convert_field_get(t: OSTerm, field: str,
@@ -178,18 +194,13 @@ def convert_field_get(t: OSTerm, field: str,
     """
     ty = os_theory.expand_type(thy, t.type)
     if isinstance(ty, os_struct.OSStructType) and ty.name in thy.structs:
-        # Other cases of structure
+        # Structure case
         field_ty = thy.get_field_type(ty, field)
         return convert_ufunc(ty.name + "." + field, [t], field_ty, thy, ctxt)
     elif isinstance(ty, os_struct.OSHLevelType) and ty.name in thy.datatypes:
         # Datatype case
-        datatype = thy.datatypes[ty.name]
-        if isinstance(t, os_term.OSFun) and t.func_name in datatype.branch_map:
-            field_id = datatype.get_field_id(t.func_name, field)
-            return convert(thy, t.args[field_id], ctxt)
-        else:
-            field_ty = thy.get_field_type(ty, field)
-            return convert_ufunc(ty.name + "." + field, [t], field_ty, thy, ctxt)
+        field_ty = thy.get_field_type(ty, field)
+        return convert_ufunc(ty.name + "." + field, [t], field_ty, thy, ctxt)
     else:
         raise AssertionError("convert_field_get: unknown type %s for structure" % t.type)
 
@@ -204,11 +215,7 @@ def convert_id(t: OSTerm,
     ty = os_theory.expand_type(thy, t.type)
     if not (isinstance(ty, os_struct.OSHLevelType) and ty.name in thy.datatypes):
         raise AssertionError("convert_id: unknown type %s" % ty)
-    datatype = thy.datatypes[ty.name]
-    if isinstance(t, os_term.OSFun) and t.func_name in datatype.branch_map:
-        return z3.IntVal(datatype.get_branch_id(t.func_name))
-    else:
-        return convert_ufunc(ty.name + ".id", [t], os_struct.Int, thy, ctxt)
+    return convert_ufunc(ty.name + ".id", [t], os_struct.Int, thy, ctxt)
 
 def convert_equality(t1: OSTerm, t2: OSTerm,
                      thy: os_theory.OSTheory, ctxt: Z3ConvertContext, *, recurse=False):
@@ -327,6 +334,11 @@ def convert_equality(t1: OSTerm, t2: OSTerm,
 
     return res
 
+mapFuncs = (
+    'isEmpty', 'subseteq', 'join', 'remove', 'disjoint', 'merge', 'minus',
+    'disjUnion', 'mapUpdate'
+)
+
 def convert(thy: os_theory.OSTheory, t: OSTerm,
             ctxt: Z3ConvertContext) -> z3.Z3PPObject:
     """Convert OSTerm to z3 term.
@@ -432,8 +444,7 @@ def convert(thy: os_theory.OSTheory, t: OSTerm,
             a, b, c = convert(thy, t.args[0], ctxt), convert(thy, t.args[1], ctxt), \
                       convert(thy, t.args[2], ctxt)
             res = z3.Store(a, z3.BV2Int(b), c)
-        elif t.func_name in ('isEmpty', 'subseteq', 'join', 'remove',
-                             'disjoint', 'merge', 'minus', 'disjUnion', 'mapUpdate'):
+        elif t.func_name in mapFuncs:
             res = convert(thy, os_simplify.rewrite_thm(thy, t.func_name + "_def", t), ctxt)
         else:
             res = convert_ufunc(t.func_name, t.args, t.type, thy, ctxt)
@@ -480,15 +491,33 @@ def convert(thy: os_theory.OSTheory, t: OSTerm,
             return convert(thy, simp_t, ctxt)
         elif os_struct.isListType(ty):
             if t.quantifier == "forall":
-                simp_t = os_term.OSQuant(
-                    "forall", [t.param],
-                    os_term.implies(os_term.inlist(t.param, t.collection), t.body)
-                )
+                if isinstance(t.collection, os_term.OSFun) and t.collection.func_name == "range":
+                    simp_t = os_term.OSQuant(
+                        "forall", [t.param],
+                        os_term.implies(os_term.conj(
+                            os_term.greater_eq(t.param, t.collection.args[0]),
+                            os_term.less(t.param, t.collection.args[1])
+                        ), t.body)
+                    )
+                else:
+                    simp_t = os_term.OSQuant(
+                        "forall", [t.param],
+                        os_term.implies(os_term.inlist(t.param, t.collection), t.body)
+                    )
             elif t.quantifier == "exists":
-                simp_t = os_term.OSQuant(
-                    "exists", [t.param],
-                    os_term.conj(os_term.inlist(t.param, t.collection), t.body)
-                )
+                if isinstance(t.collection, os_term.OSFun) and t.collection.func_name == "range":
+                    simp_t = os_term.OSQuant(
+                        "exists", [t.param],
+                        os_term.implies(os_term.conj(
+                            os_term.greater_eq(t.param, t.collection.args[0]),
+                            os_term.less(t.param, t.collection.args[1])
+                        ), t.body)
+                    )
+                else:
+                    simp_t = os_term.OSQuant(
+                        "exists", [t.param],
+                        os_term.conj(os_term.inlist(t.param, t.collection), t.body)
+                    )
             else:
                 raise NotImplementedError
             return convert(thy, simp_t, ctxt)
@@ -581,6 +610,7 @@ def convert(thy: os_theory.OSTheory, t: OSTerm,
     else:
         raise NotImplementedError("t = %s, type = %s" % (t, type(t)))
 
+    # Record the current term as visited.
     ctxt.visited[t] = res
 
     ty = os_theory.expand_type(thy, t.type)
@@ -600,6 +630,27 @@ def convert(thy: os_theory.OSTheory, t: OSTerm,
             ctxt.add_constraint(convert(
                 thy, os_term.less(id_t, os_term.integer(len(datatype.branches))), ctxt))
 
+    # If type is already visited, just return res
+    if ty in ctxt.visited_type:
+        return res
+
+    ctxt.visited_type.add(ty)
+
+    # Otherwise, add type-specific constraints
+    if isinstance(ty, os_struct.OSHLevelType) and ty.name in thy.datatypes:
+        datatype = thy.datatypes[ty.name]
+
+        var = os_term.OSVar("v", type=ty)
+        id_t = os_term.FieldGet(var, "id", type=os_struct.Int)
+        # Constraint on id: for datatypes, the id of the datatype is in
+        # the range [0, n), where n is the number of branches.
+        ctxt.add_constraint(convert(
+            thy, os_term.OSQuant("forall", [var], os_term.greater_eq(id_t, os_term.integer(0))), ctxt)
+        )
+        ctxt.add_constraint(convert(
+            thy, os_term.OSQuant("forall", [var], os_term.less(id_t, os_term.integer(len(datatype.branches)))), ctxt)
+        )
+
     return res
 
 class SolveResult:
@@ -615,9 +666,17 @@ class UnsatResult(SolveResult):
         "unsat"
 
 class ModelResult(SolveResult):
-    """Sat result with model."""
-    def __init__(self, model: os_model.Model):
+    """Sat result with model.
+    
+    Returning a ModelResult usually indicates a (potentially spurious)
+    counterexample is found. In this case, the convert context is
+    recorded to help debug the counterexample.
+    
+    """
+    def __init__(self, model: os_model.Model, ctxt: Z3ConvertContext, funcs: Iterable[str]):
         self.model = model
+        self.ctxt = ctxt
+        self.funcs = tuple(funcs)
 
 def solve(thy: os_theory.OSTheory,
           assumes: Iterable[OSTerm], concl: OSTerm, *,
@@ -666,9 +725,11 @@ def solve(thy: os_theory.OSTheory,
     # Conversion context used for transforming assumption and goal
     ctxt = Z3ConvertContext()
 
+    funcs: List[Tuple[str, OSType]] = list()
     # Add each assumption
     for assume in assumes:
         simplify_t = os_simplify.simplify(thy, assume)
+        simplify_t.get_funcs_inplace(funcs)
         if verbose:
             print('assume (after simp):', simplify_t)
         # print(simplify_t)
@@ -678,12 +739,42 @@ def solve(thy: os_theory.OSTheory,
 
     # Add conclusion
     simplify_t = os_simplify.simplify(thy, concl)
+    simplify_t.get_funcs_inplace(funcs)
     if verbose:
         print('show (after simp):', simplify_t)
     # print(simplify_t)
     z3_t = convert(thy, simplify_t, ctxt)
     # print(z3_t)
     s.add(z3.Not(z3_t))
+
+    # Obtain list of abstract functions
+    abstract_funcs = [(func_name, ty) for func_name, ty in funcs if
+        func_name not in thy.constr_datatype and
+        func_name not in mapFuncs and
+        func_name not in ('indom', 'get', 'nth', 'Store', 'range', 'ite')]
+    
+    # For each abstract function, add the corresponding simplify
+    # functions
+    for func_name, ty in abstract_funcs:
+        if func_name in thy.fixps:
+            fixp = thy.fixps[func_name]
+            if fixp.is_recursive_func() and \
+                isinstance(fixp.body, os_term.OSSwitch) and \
+                fixp.body.switch_expr in fixp.params and \
+                os_theory.is_standard_switch(thy, fixp.body):
+                func_ty, ty_params = thy.get_func_type(func_name)
+                sch_func_ty = func_ty.make_schematic(ty_params)
+                tyinst: Dict[str, OSType] = dict()
+                assert sch_func_ty.match(ty, tyinst)
+                concrete_tys = [tyinst['?' + ty_param] for ty_param in ty_params]
+                for i, branch in enumerate(fixp.body.branches):
+                    if isinstance(branch, os_term.OSSwitchBranchCase):
+                        prop = thy.get_forall_theorem(fixp.name + "_simps" + str(i+1), concrete_tys)
+                        if verbose:
+                            print("use theorem:", prop)
+                        z3_t = convert(thy, prop, Z3ConvertContext()) 
+                        # print(z3_t)
+                        s.add(z3_t)
 
     # Add constraints
     for constraint in ctxt.constraints:
@@ -694,7 +785,7 @@ def solve(thy: os_theory.OSTheory,
     if str(ret) == 'unsat':
         return UnsatResult()
     else:
-        return ModelResult(s.model())
+        return ModelResult(s.model(), ctxt, abstract_funcs)
 
 def solve_query(thy: os_theory.OSTheory, query: os_query.Query, *,
                 thm_spec: Iterable[os_theory.TheoremSpec] = tuple(),
@@ -722,17 +813,14 @@ def solve_model(thy: os_theory.OSTheory, query: os_query.Query, *,
         if verbose:
             print('---- Raw model ----')
             print(res.model)
-        model = convert_model(thy, query.fixes, res.model)
+        model = convert_model(thy, query.type_params, query.fixes, res.model, verbose=False)
         return model
     else:
         raise NotImplementedError
 
 
-def convert_z3_expr(z3_t: Optional[z3.Z3PPObject]) -> Optional[OSTerm]:
+def convert_z3_expr(z3_t: z3.Z3PPObject) -> OSTerm:
     """Convert the Z3 expression to OS expressions"""
-    if z3_t is None:
-        return None
-
     if not isinstance(z3_t, z3.Z3PPObject):
         raise AssertionError("convert_z3_expr on %s, type %s" % (z3_t, type(z3_t)))
 
@@ -757,35 +845,17 @@ def convert_z3_expr(z3_t: Optional[z3.Z3PPObject]) -> Optional[OSTerm]:
             return os_term.OSNumber(False)
         else:
             raise AssertionError
-    elif isinstance(z3_t, z3.ArrayRef):
-        if z3.is_K(z3_t):
-            return os_term.OSFun("K", convert_z3_expr(z3_t.children()[0]))
-        elif z3.is_store(z3_t):
-            a, k, v = z3_t.children()
-            return os_term.OSFun("Store", convert_z3_expr(a), convert_z3_expr(k), convert_z3_expr(v))
-        else:
-            raise NotImplementedError("convert_z3_expr on %s, type %s" % (z3_t, type(z3_t)))
     elif isinstance(z3_t, z3.BitVecRef):
-        raise AssertionError
+        raise AssertionError("convert_z3_expr on %s, type %s" % (z3_t, type(z3_t)))
     else:
         raise NotImplementedError("convert_z3_expr on %s, type %s" % (z3_t, type(z3_t)))
-
-def get_func_eval(func: z3.FuncInterp, key: z3.Z3PPObject) -> z3.Z3PPObject:
-    """Return evaluation of Z3 function."""
-    if func.arity() != 1:
-        raise NotImplementedError("get_func_eval: arity %d" % func.arity())
-    for i in range(func.num_entries()):
-        cur_key, cur_val = func.entry(i).arg_value(0), func.entry(i).value()
-        if key == cur_key:
-            return cur_val
-    return func.else_value()
 
 def get_model_for_val(thy: os_theory.OSTheory,
                       model: z3.ModelRef,
                       model_map: Dict[str, z3.Z3PPObject],
-                      type_map: Dict[str, OSType],
+                      type_map: Dict[str, List[z3.Z3PPObject]],
                       z3_val: z3.Z3PPObject,
-                      ty: OSType) -> Optional[OSTerm]:
+                      ty: OSType) -> OSTerm:
     """Obtain the model value for the given variable and type.
     
     Parameters
@@ -796,8 +866,8 @@ def get_model_for_val(thy: os_theory.OSTheory,
         Z3 model to be converted
     model_map : Dict[str, z3.Z3PPObject]
         mapping from variable name to value in the model
-    type_map : Dict[str, OSType]
-        mapping from variable to type
+    type_map : Dict[str, List[z3.Z3PPObject]]
+        mapping from type name to list of Z3 expressions
     z3_val : z3.Z3PPObject
         Z3 value to be converted
     ty : OSType
@@ -808,7 +878,18 @@ def get_model_for_val(thy: os_theory.OSTheory,
     if isinstance(ty, os_struct.OSPrimType):
         return convert_z3_expr(z3_val)
     elif isinstance(ty, os_struct.OSArrayType):
-        return convert_z3_expr(z3_val)
+        assert isinstance(z3_val, z3.ArrayRef)
+        if z3.is_K(z3_val):
+            Kval = get_model_for_val(thy, model, model_map, type_map, z3_val.children()[0], ty.base_type)
+            return os_term.OSFun("K", Kval, type=ty)
+        elif z3.is_store(z3_val):
+            z3_a, z3_k, z3_v = z3_val.children()
+            a = get_model_for_val(thy, model, model_map, type_map, z3_a, ty)
+            k = get_model_for_val(thy, model, model_map, type_map, z3_k, os_struct.Int)
+            v = get_model_for_val(thy, model, model_map, type_map, z3_v, ty.base_type)
+            return os_term.OSFun("Store", a, k, v, type=ty)
+        else:
+            raise NotImplementedError("get_model_for_val on array %s", z3_val)
     elif isinstance(ty, os_struct.OSPointerType):
         return convert_z3_expr(z3_val)
     elif isinstance(ty, os_struct.OSStructType):
@@ -817,60 +898,77 @@ def get_model_for_val(thy: os_theory.OSTheory,
         for field in struct.fields:
             func_name = ty.name + "." + field.field_name
             # It is possible that values for some fields are missing in the z3 model.
-            field_type = os_theory.expand_type(thy, field.type)
-            if func_name in model_map:
-                func = model_map[func_name]
-                if func is not None:
-                    val = get_func_eval(func, z3_val)
-                    if val is not None:
-                        struct_vals.append((
-                            field.field_name,
-                            get_model_for_val(thy, model, model_map, type_map, val, field_type)))
+            if func_name not in model_map:
+                field_val = os_term.OSUnknown(type=field.type)
+            else:
+                func = z3.Function(func_name, get_Z3type(thy, ty), get_Z3type(thy, field.type))
+                val = model.eval(func(z3_val))
+                if val is None:
+                    field_val = os_term.OSUnknown(type=field.type)
+                else:
+                    field_val = get_model_for_val(thy, model, model_map, type_map, val, field.type)
+            struct_vals.append((field.field_name, field_val))
         return os_term.OSStructVal(ty.name, struct_vals)
     elif isinstance(ty, os_struct.OSHLevelType):
         if ty.name in thy.datatypes:
             datatype = thy.datatypes[ty.name]
             # First obtain the ID of the constructor
-            id_func = model_map[ty.name + ".id"]
-            if id_func is None:
-                return None
-            id_val = get_func_eval(id_func, z3_val)
-            assert isinstance(id_val, z3.IntNumRef)
+            id_func_name = get_z3_name(ty.name + ".id", ty.params)
+            if id_func_name not in model_map:
+                return os_term.OSUnknown(ty)
+
+            func = z3.Function(id_func_name, get_Z3type(thy, ty), get_Z3type(thy, os_struct.Int))
+            id_val = model.eval(func(z3_val))
+            if id_val is None:
+                return os_term.OSUnknown(ty)
+
+            assert isinstance(id_val, z3.IntNumRef), "id_val %s is not integer" % id_val
             id = id_val.as_long()
 
             # Next, create the appropriate constructor
-            assert id in range(len(datatype.branches))
+            assert id in range(len(datatype.branches)), \
+                "unexpected id %s for datatype %s (%s branches) for %s" % (
+                    id, ty.name, len(datatype.branches), z3_val
+                )
             branch = datatype.branches[id]
             args = list()
             for param_name, _ in branch.params:
                 field_ty = thy.get_field_type(ty, param_name)
-                func_name = ty.name + "." + param_name
-                func = model_map[func_name]
-                if func is not None:
-                    val = get_func_eval(func, z3_val)
+                func_name = get_z3_name(ty.name + "." + param_name, ty.params)
+                if func_name not in model_map:
+                    args.append(os_term.OSUnknown(type=field_ty))
+                else:
+                    func = z3.Function(func_name, get_Z3type(thy, ty), get_Z3type(thy, field_ty))
+                    val = model.eval(func(z3_val))
                     if val is None:
-                        return None
-                    args.append(get_model_for_val(thy, model, model_map, type_map, val, field_ty))
+                        args.append(os_term.OSUnknown(type=field_ty))
+                    else:
+                        args.append(get_model_for_val(thy, model, model_map, type_map, val, field_ty))
             return os_term.OSFun(branch.constr_name, *args, type=ty)
         elif ty.name in thy.typedefs:
             return get_model_for_val(thy, model, model_map, type_map, z3_val, thy.typedefs[ty.name])
         elif ty.name == "Map":
             key_ty, value_ty = ty.params
             values: List[Tuple[OSTerm, OSTerm]] = list()
-            for var, var_ty in type_map.items():
-                if var_ty == key_ty:
-                    key_val = model_map[var]
-                    indom_f = z3.Function("indom", get_Z3type(thy, key_ty), get_Z3type(thy, ty), get_Z3type(thy, os_struct.Bool))
-                    indom_t = indom_f([key_val, z3_val])
-                    indom_val = model.eval(indom_t)
-                    assert z3.is_true(indom_val) or z3.is_false(indom_val)
-                    if z3.is_false(indom_val):
-                        continue
-                    get_f = z3.Function("get", get_Z3type(thy, key_ty), get_Z3type(thy, ty), get_Z3type(thy, value_ty))
-                    get_t = get_f([key_val, z3_val])
-                    get_val = model.eval(get_t)
-                    values.append((get_model_for_val(thy, model, model_map, type_map, key_val, key_ty),
-                                   get_model_for_val(thy, model, model_map, type_map, get_val, value_ty)))
+            type_name = str(get_Z3type(thy, key_ty))
+            assert type_name in type_map, "type %s not found in type_map" % type_name
+            for key_val in type_map[type_name]:
+                indom_f = z3.Function(
+                    get_z3_name("indom", [key_ty, value_ty]),
+                    get_Z3type(thy, key_ty), get_Z3type(thy, ty), get_Z3type(thy, os_struct.Bool))
+                indom_t = indom_f([key_val, z3_val])
+                indom_val = model.eval(indom_t)
+                assert z3.is_true(indom_val) or z3.is_false(indom_val), \
+                    ("unable to evaluate %s, got %s" % (indom_t, indom_val))
+                if z3.is_false(indom_val):
+                    continue
+                get_f = z3.Function(
+                    get_z3_name("get", [key_ty, value_ty]),
+                    get_Z3type(thy, key_ty), get_Z3type(thy, ty), get_Z3type(thy, value_ty))
+                get_t = get_f([key_val, z3_val])
+                get_val = model.eval(get_t)
+                values.append((get_model_for_val(thy, model, model_map, type_map, key_val, key_ty),
+                                get_model_for_val(thy, model, model_map, type_map, get_val, value_ty)))
             return os_term.list_map(key_ty, value_ty, *values)
         else:
             raise NotImplementedError
@@ -879,19 +977,62 @@ def get_model_for_val(thy: os_theory.OSTheory,
         return os_term.OSVar(z3_val.decl().name(), type=ty)
     elif isinstance(ty, os_struct.OSFunctionType):
         # TODO: get model for uninterpreted functions
-        return None
+        raise NotImplementedError("get_model_for_val for functions")
     else:
         raise NotImplementedError("get_model_for_val for type %s" % ty)
 
+def parse_z3_var(name: str) -> Optional[int]:
+    """Parse expression of the form Var(n).
+    
+    If successful, return the integer. Otherwise, return None.
+    
+    """
+    if name.startswith("Var(") and name.endswith(")"):
+        middle = name[4:-1]
+        return int(middle)
+    else:
+        return None
+
+def parse_z3_const(name: str) -> Optional[str]:
+    """Parse expression of the form <type>!val!n.
+    
+    If successful, return the name of the type. Otherwise, return None.
+    
+    """
+    pos = name.find("!val!")
+    if pos == -1:
+        return None
+    return name[:pos]
+
+def analyze_z3_expr(expr: z3.Z3PPObject, type_map: Dict[str, List[z3.Z3PPObject]]):
+    if isinstance(expr, z3.ExprRef):
+        childs = expr.children()
+        if len(childs) == 0:
+            ty = parse_z3_const(str(expr))
+            if ty is not None:
+                if ty not in type_map:
+                    type_map[ty] = list()
+                if expr not in type_map[ty]:
+                    type_map[ty].append(expr)
+        else:
+            for child in expr.children():
+                analyze_z3_expr(child, type_map)
+    else:
+        pass
+
 def convert_model(thy: os_theory.OSTheory,
+                  type_params: Iterable[str],
                   vars: Iterable[os_term.OSVar],
-                  model: z3.ModelRef) -> os_query.Model:
+                  model: z3.ModelRef,
+                  verbose: bool = False) -> os_query.Model:
     """Convert a Z3 model to a more readable form.
     
     Parameters
     ----------
     thy : OSTheory
         The current theory
+    type_params : Iterable[str]
+        List of type parameters
     vars : Iterable[OSVar]
         List of variables, the function will try to find assignment of
         each variable in the list.
@@ -899,18 +1040,44 @@ def convert_model(thy: os_theory.OSTheory,
         The original Z3 model.
 
     """
+    os_term.CHECK_INIT_TYPE = True
     res = os_query.Model()
 
     # Mapping from variable name to value in the model
     model_map: Dict[str, z3.Z3PPObject] = dict()
+
+    # Mapping from type name to list of Z3 objects
+    type_map: Dict[str, List[z3.Z3PPObject]] = dict()
+
+    if verbose:
+        print('--- Original model ---')
     for decl in model.decls():
         assert isinstance(decl, z3.FuncDeclRef)
-        model_map[decl.name()] = model[decl]
+        val = model[decl]
+        model_map[decl.name()] = val
+        if verbose:
+            print("%s = %s" % (decl.name(), val))
+        if isinstance(val, z3.FuncInterp):
+            lst = val.as_list()
+            for pair in lst[:-1]:
+                analyze_z3_expr(pair[0], type_map)
+                analyze_z3_expr(pair[1], type_map)
+            analyze_z3_expr(lst[-1], type_map)
 
-    # Mapping from variable name to type
-    type_map: Dict[str, OSType] = dict()
-    for var in vars:
-        type_map[var.name] = os_theory.expand_type(thy, var.type)
+    if verbose:
+        print('--- type_map ---')
+        for ty, z3_vals in type_map.items():
+            print("%s: %s" % (ty, z3_vals))
+
+    type_map_val = dict()
+    from osverify import os_parser
+    ctxt = os_theory.OSContext(thy)
+    ctxt.type_params = type_params
+    for ty, z3_vals in type_map.items():
+        ty = os_parser.parse_type(thy, ctxt, ty)
+        for z3_val in z3_vals:
+            type_map_val[z3_val] = get_model_for_val(thy, model, model_map, type_map, z3_val, ty)
+            # print(z3_val, type_map_val[z3_val])
 
     for var in vars:
         name, ty = var.name, os_theory.expand_type(thy, var.type)
@@ -921,4 +1088,105 @@ def convert_model(thy: os_theory.OSTheory,
                 assert isinstance(val, OSTerm), "val: %s, type: %s" % (val, type(val))
                 val.assert_type_checked()
             res.data[name] = val
+
+    os_term.CHECK_INIT_TYPE = False
     return res
+
+def diagnose_diff(thy: os_theory.OSTheory,
+                  t: OSTerm,
+                  z3_model: z3.ModelRef,
+                  ctxt: Z3ConvertContext,
+                  model: os_query.Model):
+    """Diagnose cause of different output with Z3."""
+    print('os result', os_model.evaluate_term(thy, t.subst(model.data)))
+    simp_t = os_simplify.simplify(thy, t)
+    z3_t = convert(thy, simp_t, ctxt)
+    print('simp_t', simp_t)
+    # print('z3_t', z3_t)
+
+    # Mapping from variable name to value in the model
+    model_map: Dict[str, z3.Z3PPObject] = dict()
+
+    # Mapping from type name to list of Z3 objects
+    type_map: Dict[str, List[z3.Z3PPObject]] = dict()
+
+    for decl in z3_model.decls():
+        assert isinstance(decl, z3.FuncDeclRef)
+        val = z3_model[decl]
+        model_map[decl.name()] = val
+        if isinstance(val, z3.FuncInterp):
+            lst = val.as_list()
+            for pair in lst[:-1]:
+                analyze_z3_expr(pair[0], type_map)
+                analyze_z3_expr(pair[1], type_map)
+            analyze_z3_expr(lst[-1], type_map)
+
+    def diagnose(t: OSTerm) -> OSTerm:
+        """Diagnose the given term by comparing the output of Z3 and own
+        evaluator. Return the own evaluated result.
+        
+        """
+        if isinstance(t, os_term.OSOp):
+            if t.op == '&&':
+                a = diagnose(t.args[0])
+                if a == os_term.true:
+                    diagnose(t.args[1])
+            elif t.op == '||':
+                a = diagnose(t.args[0])
+                if a == os_term.false:
+                    diagnose(t.args[1])
+            elif t.op == '->':
+                a = diagnose(t.args[0])
+                if a == os_term.true:
+                    diagnose(t.args[1])
+            else:
+                z3_t = convert(thy, t, ctxt)
+                z3_res = z3_model.eval(z3_t)
+                eval_res = os_model.evaluate_term(thy, t.subst(model.data))
+                if get_model_for_val(thy, z3_model, model_map, type_map, z3_res, t.type) != eval_res:
+                    raise AssertionError
+                return eval_res
+        elif isinstance(t, os_term.OSQuantIn):
+            ty = t.collection.type
+            if os_struct.isMapType(ty):
+                if t.quantifier == "forall":
+                    raise NotImplementedError(t)
+                elif t.quantifier == "exists":
+                    coll = t.collection.subst(model.data)
+                    map = os_term.strip_map(coll)
+                    for k in map:
+                        inst = dict()
+                        inst[t.param.name] = k
+                        body_new = t.body.subst(inst)
+                        res = diagnose(body_new)
+                        if res == os_term.true:
+                            return res
+                    return os_term.false
+                else:
+                    raise NotImplementedError(t)
+            elif os_struct.isListType(ty):
+                if t.quantifier == "forall":
+                    if isinstance(t.collection, os_term.OSFun) and \
+                        t.collection.func_name == "range" and \
+                        isinstance(t.collection.args[0], os_term.OSNumber) and \
+                        isinstance(t.collection.args[1], os_term.OSNumber):
+                        start = t.collection.args[0].val
+                        end = t.collection.args[1].val
+                        for i in range(start, end):
+                            inst = dict()
+                            inst[t.param.name] = os_term.OSNumber(i, type=os_struct.Int32U)
+                            body_new = t.body.subst(inst)
+                            res = diagnose(body_new)
+                            if res == os_term.false:
+                                return res
+                        return os_term.true
+                    else:
+                        raise NotImplementedError(t)
+                else:
+                    raise NotImplementedError(t)
+            else:
+                raise NotImplementedError(t)
+        else:
+            raise NotImplementedError(t)
+
+    diagnose(simp_t)

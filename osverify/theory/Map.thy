@@ -29,19 +29,19 @@ predicate subseteq<K, V>(Map<K, V> m1, Map<K, V> m2) {
 
 // Map join
 predicate join<K, V>(K key, V value, Map<K, V> map_ori, Map<K, V> map_new) {
+    !indom(key, map_ori) && indom(key, map_new) && get(key, map_new) == value &&
     forall (K k) {
-        (k != key -> indom(k, map_ori) == indom(k, map_new) &&
-                     (indom(k, map_ori) -> get(k, map_ori) == get(k, map_new))) &&
-        (k == key -> !indom(k, map_ori) && indom(k, map_new) && get(k, map_new) == value)
+        k != key -> indom(k, map_ori) == indom(k, map_new) &&
+                    (indom(k, map_ori) -> get(k, map_ori) == get(k, map_new))
     }
 }
 
 // mapUpdate, assume key is already in map
 predicate mapUpdate<K, V>(K key, V value, Map<K,V> map_ori, Map<K, V> map_new) {
+    indom(key, map_new) && get(key, map_new) == value &&
     forall (K k) {
-        (k != key -> indom(k, map_ori) == indom(k, map_new) &&
-                (indom(k, map_ori) -> get(k, map_ori) == get(k, map_new))) &&
-        (k == key -> indom(k, map_new) && get(k, map_new) == value)
+        k != key -> indom(k, map_ori) == indom(k, map_new) &&
+                    (indom(k, map_ori) -> get(k, map_ori) == get(k, map_new))
     }
 }
 

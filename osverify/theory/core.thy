@@ -16,3 +16,6 @@ datatype List<E> =
 datatype Option<T> =
     none
     | some (T val)
+
+// Range function
+axiomfunc range : int32u -> int32u -> List<int32u>

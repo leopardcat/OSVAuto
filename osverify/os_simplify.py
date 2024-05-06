@@ -8,6 +8,7 @@ from osverify.os_term import OSTerm
 from osverify import os_theory
 from osverify.os_theory import OSTheory
 from osverify import os_match
+from osverify.os_util import variant_names
 
 def rewrite(thy: OSTheory, eq_th: OSTerm, t: OSTerm) -> OSTerm:
     """Perform rewrite once using given theorem.
@@ -203,7 +204,8 @@ def simplify_switch_once(thy: OSTheory, t: OSTerm) -> OSTerm:
 
         # Constructor of the pattern, make sure it is one of the datatype constructors
         if pattern.func_name not in datatype.branch_map:
-            raise AssertionError
+            raise AssertionError("function %s is not a constructor of %s" % (
+                pattern.func_name, ty.name))
         
         default = os_term.OSSwitchBranchDefault(os_term.OSSwitch(t.switch_expr, t.branches[1:], type=t.type))
 
@@ -213,11 +215,17 @@ def simplify_switch_once(thy: OSTheory, t: OSTerm) -> OSTerm:
             branch = datatype.branch_map[pattern.func_name]
             reduce_params, reduce_args = list(), list()
             pat_params = list()
+
+            _, vars = t.get_vars()
+            vars: Set[os_term.OSVar] = set([var.name for var in vars])
             for arg, (param_name, _) in zip(pattern.args, branch.params):
                 if not isinstance(arg, os_term.OSVar):
-                    reduce_params.append(os_term.OSVar(param_name, type=arg.type))
+                    new_name = variant_names(vars, param_name)
+                    new_var = os_term.OSVar(new_name, type=arg.type)
+                    reduce_params.append(new_var)
+                    vars.add(new_name)
                     reduce_args.append(arg)
-                    pat_params.append(os_term.OSVar(param_name, type=arg.type))
+                    pat_params.append(new_var)
                 else:
                     pat_params.append(arg)
             pat = os_term.OSFun(pattern.func_name, *pat_params, type=pattern.type)
@@ -227,6 +235,8 @@ def simplify_switch_once(thy: OSTheory, t: OSTerm) -> OSTerm:
                 case_params = os_term.OSSwitchBranchCase(pat, inner)
                 outer = os_term.OSSwitch(t.switch_expr, [case_params, default], type=t.type)
                 return outer
+            elif len(t.branches) > 2:
+                return os_term.OSSwitch(t.switch_expr, [t.branches[0], default], type=t.type)
             else:
                 return t
 
@@ -268,6 +278,7 @@ def simplify_let(thy: OSTheory, t: OSTerm) -> OSTerm:
     return t
 
 def simplify_field_get(thy: OSTheory, t: OSTerm) -> OSTerm:
+    """Simplify field get expression."""
     if isinstance(t, os_term.FieldGet):
         if isinstance(t.expr, os_term.OSStructVal):
             return t.expr.dict_vals[t.field]

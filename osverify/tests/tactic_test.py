@@ -31,7 +31,7 @@ class OSTacticTest(unittest.TestCase):
         """
 
         res_states = os_tactics.Induction(os_tactics.InductionParam("xs", []), tuple()).exec(thy, state)
-        self.assertEqual(len(res_states), 2)
+        self.assertEqual(res_states.num_unsolved(), 2)
         assert isinstance(res_states, os_tactics.CaseProofState)
         self.assertEqual(res_states.cases[0][2], os_parser.parse_proof_state(
             thy, "state { type T; shows append(nil::List<T>, nil) == nil }"))
@@ -70,7 +70,7 @@ class OSTacticTest(unittest.TestCase):
         }
         """
         res_states = os_tactics.Induction(os_tactics.InductionParam("xs", []), tuple()).exec(thy, state)
-        self.assertEqual(len(res_states), 2)
+        self.assertEqual(res_states.num_unsolved(), 2)
         assert isinstance(res_states, os_tactics.CaseProofState)
         self.assertEqual(res_states.cases[0][2], os_parser.parse_proof_state(
             thy, append_assoc_nil))
