@@ -8,6 +8,14 @@ We assume relatively new versions of Python (version 3.12 is suggested). The too
 
 ```bash
 pip install -r requirements.txt
+semi-automatic verifier for functional specifications of operating systems
+
+# Installation
+In any environment with python and pip, use pip to install Lark: 
+
+```
+$ pip3 install z3-solver
+$ pip3 install Lark
 ```
 
 ## Running tests
