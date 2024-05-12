@@ -355,12 +355,10 @@ def expand_type(thy: OSTheory, ty: OSType) -> OSType:
         expanded version of ty, with all typedefs replaced by their definitions.
 
     """
-    if isinstance(ty, (os_struct.OSVoidType, os_struct.OSPrimType, os_struct.OSStructType, os_struct.OSBoundType)):
+    if isinstance(ty, (os_struct.OSPrimType, os_struct.OSStructType, os_struct.OSBoundType)):
         return ty
     elif isinstance(ty, os_struct.OSArrayType):
         return os_struct.OSArrayType(expand_type(thy, ty.base_type))
-    elif isinstance(ty, os_struct.OSPointerType):
-        return os_struct.OSPointerType(expand_type(thy, ty.type))
     elif isinstance(ty, os_struct.OSHLevelType):
         if ty.name in thy.typedefs:
             return expand_type(thy, thy.typedefs[ty.name])
@@ -857,7 +855,7 @@ class OSContext:
         # List of declared tactic variables
         self.tactic_vars: Set[str] = set()
 
-    def add_var_decl(self, var_name: str, type: OSType = os_struct.OSVoidType):
+    def add_var_decl(self, var_name: str, type: OSType):
         """Add variable declaration"""
         if var_name in self.var_decls:
             raise AssertionError("add_var_decl: variable %s already defined" % var_name)

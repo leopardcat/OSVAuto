@@ -82,7 +82,7 @@ function list_remove<T>(T x, List<T> xs) -> List<T> {
 
 // Maximum values for various word sizes
 consts {
-    int32u_MAX = 255;
-    INT16U_MAX = 65535;
-    INT32U_MAX = 4294967295;
+    int8u_MAX = 255;
+    int16u_MAX = 65535;
+    int32u_MAX = 4294967295;
 }

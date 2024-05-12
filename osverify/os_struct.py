@@ -51,7 +51,11 @@ class OSType:
         raise NotImplementedError
     
     def get_vars_inplace(self, vars: List[str]):
-        """Add set of type variables into vars."""
+        """Add set of type variables into vars.
+        
+        Override this function to implement for new subclasses of OSType.
+        
+        """
         raise NotImplementedError
     
     def get_vars(self) -> Tuple[str]:
@@ -75,32 +79,6 @@ class OSType:
 prim_types: List[str] = [
     "bool", "int", "int8u", "int16u", "int32u"
 ]
-
-class OSVoidType(OSType):
-    """Void type. Usually used with pointer type."""
-    def __init__(self):
-        pass
-
-    def __eq__(self, other):
-        return isinstance(other, OSVoidType)
-
-    def __str__(self):
-        return "void"
-    
-    def __repr__(self):
-        return "OSVoidType()"
-
-    def __hash__(self):
-        return hash("OSVoidType")
-
-    def subst(self, tyinst: Dict[str, OSType]) -> OSType:
-        return self
-    
-    def match(self, other: OSType, tyinst: Dict[str, OSType]):
-        return self == other
-    
-    def get_vars_inplace(self, vars: List[str]):
-        pass
 
 class OSPrimType(OSType):
     """Primitive types. Name must be one of prim_types."""
@@ -182,34 +160,6 @@ class OSStructType(OSType):
 
     def get_vars_inplace(self, vars: List[str]):
         pass
-
-class OSPointerType(OSType):
-    """Pointer types."""
-    def __init__(self, type: OSType):
-        self.type = type
-
-    def __eq__(self, other):
-        return isinstance(other, OSPointerType) and self.type == other.type
-
-    def __str__(self):
-        return str(self.type) + "*"
-    
-    def __repr__(self):
-        return "OSPointerType(%s)" % repr(self.type)
-
-    def __hash__(self):
-        return hash(("OSPointerType", self.type))
-
-    def subst(self, tyinst: Dict[str, OSType]) -> OSType:
-        return OSPointerType(self.type.subst(tyinst))
-    
-    def match(self, other: OSType, tyinst: Dict[str, OSType]) -> bool:
-        if not isinstance(other, OSPointerType):
-            return False
-        return self.type.match(other.type, tyinst)
-
-    def get_vars_inplace(self, vars: List[str]):
-        self.type.get_vars_inplace(vars)
 
 class OSHLevelType(OSType):
     """Defined types.

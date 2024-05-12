@@ -84,9 +84,7 @@ def get_Z3type(thy: os_theory.OSTheory, ty: OSType):
         type to be converted.
 
     """
-    if isinstance(ty, os_struct.OSVoidType):
-        raise NotImplementedError
-    elif isinstance(ty, os_struct.OSPrimType):
+    if isinstance(ty, os_struct.OSPrimType):
         if ty == os_struct.Bool:
             return z3.BoolSort()
         elif ty == os_struct.Int:
@@ -108,8 +106,6 @@ def get_Z3type(thy: os_theory.OSTheory, ty: OSType):
             return z3.DeclareSort(get_z3_name(ty.name, ty.params))
         else:
             raise AssertionError("get_Z3type: high-level type %s not found" % ty.name)
-    elif isinstance(ty, os_struct.OSPointerType):
-        return z3.BitVecSort(sz=32)
     elif isinstance(ty, os_struct.OSBoundType):
         return z3.DeclareSort(ty.name)
     elif isinstance(ty, os_struct.OSStructType):
@@ -890,8 +886,6 @@ def get_model_for_val(thy: os_theory.OSTheory,
             return os_term.OSFun("Store", a, k, v, type=ty)
         else:
             raise NotImplementedError("get_model_for_val on array %s", z3_val)
-    elif isinstance(ty, os_struct.OSPointerType):
-        return convert_z3_expr(z3_val)
     elif isinstance(ty, os_struct.OSStructType):
         struct = thy.structs[ty.name]
         struct_vals = list()

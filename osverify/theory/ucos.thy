@@ -418,7 +418,6 @@ predicate RLH_ECB_ETbl_MBOX_P(addrval eid, EventCtr ecb, TCBMap tcbls) {
                     eid2 == eid;
                 default: false;
             }
-            
         }
     }
 }

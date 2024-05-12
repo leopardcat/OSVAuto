@@ -24,9 +24,7 @@ os_verify_grammar = r"""
             | "int32u" -> int32u_type
 
     // General types
-    ?os_atom_type: "void" -> os_void_type
-            | os_prim_type
-            | os_atom_type "*" -> os_pointer_type
+    ?os_atom_type: os_prim_type
             | os_atom_type "[]" -> os_arr_type
             | CNAME -> os_hlevel_type
             | "?" CNAME -> os_sch_type
@@ -295,12 +293,6 @@ class OSVerifyTransformer(Transformer):
 
     def int32u_type(self) -> OSType:
         return os_struct.OSPrimType("int32u")
-    
-    def os_void_type(self) -> OSType:
-        return os_struct.OSVoidType()
-    
-    def os_pointer_type(self, type: OSType) -> OSType:
-        return os_struct.OSPointerType(type)
     
     def os_arr_type(self, type: OSType) -> OSType:
         return os_struct.OSArrayType(type)
