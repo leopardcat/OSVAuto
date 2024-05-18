@@ -294,6 +294,7 @@ Int: OSPrimType = OSPrimType("int")
 Int8U: OSPrimType = OSPrimType("int8u")
 Int16U: OSPrimType = OSPrimType("int16u")
 Int32U: OSPrimType = OSPrimType("int32u")
+BvMap: Dict[int, OSPrimType] = {8: Int8U, 16: Int16U, 32: Int32U}
 
 def MapType(K: OSType, V: OSType) -> OSType:
     return OSHLevelType("Map", K, V)
@@ -313,6 +314,13 @@ def is_bv_type(type: OSType) -> bool:
     """Return whether the given type is a bitvector type."""
     return type == Int8U or type == Int16U or type == Int32U
 
+def get_bv_type(size: int) -> OSType:
+    """Return the bit-vector type according to its size."""
+    if size in BvMap:
+        return BvMap[size]
+    else:
+        raise AssertionError("get_bv_type: unknown size %s" % size)
+    
 def is_num_type(type: OSType) -> bool:
     """Return whether the given type is a numeric type."""
     return is_bv_type or type == Nat or type == Int

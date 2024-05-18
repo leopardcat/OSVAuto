@@ -5,7 +5,7 @@ imports Map
 function length<T>(List<T> xs) -> nat {
     switch (xs) {
         case nil: 0;
-        case cons(i, xs2): succ(length(xs2));
+        case cons(_, xs2): succ(length(xs2));
     }
 }
 

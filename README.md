@@ -445,7 +445,7 @@ In this section, we describe the process for encoding a proof obligation for the
 
 The first step of encoding is *simplifying* the given term. Simplification reduces let expressions, switch expressions, field access on structure literals and constructors, and expands function definitions using rewrite rules. Here expansion of function definitions and reduction of switch expressions require more explanation, which is given in the next two subsections.
 
-The second step converts each type and term into SMT. The primitive types are converted into corresponding types in SMT. Types defined in OSVAuto (i.e. structures and algebraic datatypes) are converted to declared types in SMT, along with identities that assert the relationship between terms of that type and their fields. Finally, switch statements and (both forms of) quantifiers are converted into if-then-else and quantifier statements in SMT, respectively. These will be explained in more detail, along with correctness proofs, in the following subsections.
+The second step converts each type and term into SMT. The primitive types are converted into corresponding types in SMT. Types defined in OSVAuto (i.e. structures and algebraic datatypes) are converted to declared types in SMT, along with identities that assert the relationship between terms of that type and their fields. Maps and functions on maps are converted into `indom` and `get` functions and predicates on them. Finally, switch statements and (both forms of) quantifiers are converted into if-then-else and quantifier statements in SMT, respectively. These will be explained in more detail, along with correctness proofs, in the following subsections.
 
 ### Expansion of function definitions
 
@@ -470,6 +470,8 @@ It is possible to override the above principles by adding/removing rewrite rules
 del_attrib rewrite for TCBNode_P_def
 ```
 
+The above expansion of function definitions are applied to the input proof obligation, the relevant equality theorems are not added into Z3. For example, the rewrite rules of the recursive function `length` is applied only if expressions of the form `length(nil)` and `length(cons(i, xs2))` appears explicitly in the proof obligation. We use the following heuristic for adding equality rules to Z3: for each defined function that appears in the simplified form of the proof obligation, we add the definition of that function with appropriately instantiated type parameters. For example, if `length(xs)` appears in the simplified proof obligation, where `xs` has type `List<int32u>`, then the rewrite rules `length.simps_1<int32u>` and `length.simps_2<int32u>` are added.
+
 ### Reduction of switch expressions
 
 In OSVAuto, we allow very general kinds of patterns in switch statements. The patterns can include: wildcards, variables, constants, datatype constructors, structure literals, and tuples. Before encoding into SMT, we first reduce the switch expression into a *standard* form, where each case is either a constructor applied to variables or the default case.
@@ -478,7 +480,7 @@ The reduction process repeatedly performs one of the following rules to subterms
 
 1. If the first branch is the default case, rewrite the expression into the body of the branch. If the default case appears in the middle (i.e. not as the last branch), remove the following branches.
 
-    Example (for when the default case appears as first branch):
+    **Example** (for when the default case appears as first branch):
 
     ```
     switch (x) {
@@ -493,7 +495,7 @@ The reduction process repeatedly performs one of the following rules to subterms
 
 2. If the first branch is a variable or a wildcard, rewrite the expression into the body of the branch, with the variable replaced by the switched expression. If the variable or wildcard pattern appears in the middle (i.e. not as the last branch), remove the following cases. If the variable or wildcard pattern appears as the last branch, replace by the appropriate default branch.
 
-    Example (for when a variable appears as the first branch):
+    **Example** (for when a variable appears as the first branch):
 
     ```
     switch (e) {
@@ -508,7 +510,7 @@ The reduction process repeatedly performs one of the following rules to subterms
 
 3. If the first branch is a constant `c`, rewrite into the corresponding if-then-else expression, with the else branch containing the other cases.
 
-    Example:
+    **Example:**
 
     ```
     switch (e) {
@@ -529,7 +531,7 @@ The reduction process repeatedly performs one of the following rules to subterms
 
 4. If the first branch is a structure literal with at least one field, rewrite to a switch on the first field of the literal against the first pattern. If the pattern matches, match the original expression against the remaining parts of the structure literal. Otherwise, match the original expression against the remaining branches. If the structure literal has no fields, rewrite to the body of the first case.
 
-    Example:
+    **Example:**
 
     ```
     switch (e) {
@@ -556,7 +558,7 @@ The reduction process repeatedly performs one of the following rules to subterms
 
 5. If the switch expression and patterns are products (tuple is a special case of products), match the first part of the product, followed by the second part. If either match fails, match against the remaining branches.
 
-    Example:
+    **Example:**
 
     ```
     switch (t1, t2) {
@@ -584,7 +586,7 @@ The reduction process repeatedly performs one of the following rules to subterms
 
 6. If the branches of the switch are constructors of an algebraic datatype, determine the first branch where the constructor is not applied entirely to variables or wildcards. For the branch, create new variables for each pattern that is not variable or wildcard, and rewrite to first matching on the constructor applied entirely to variables and wildcards, and then matching the tuple of newly-created variables to the corresponding patterns, where the default for each match is the remaining cases.
 
-    Example (where `constr` is a constructor, and `pat` is not variable or wildcard):
+    **Example** (where `constr` is a constructor, and `pat` is not variable or wildcard):
 
     ```
     switch (e) {
@@ -610,52 +612,753 @@ The reduction process repeatedly performs one of the following rules to subterms
 
 By performing the above reduction rules repeatedly, we are guaranteed to eventually reach an expression in which any switch expression is in *standard* form. That is, each case is a constructor applied to variables or wildcards, except the last case which can be default. This holds because by the above rules, default branches not appearing last, variable, wildcard, constant, and structure literal branches are always eliminated, and any constructor branches are always rewritten into a form of constructor applied entirely to variable or wildcards.
 
+### Encoding of structure and algebraic datatypes
+
+We now describe the encoding of structure types and algebraic datatypes. Both are converted into newly declared types in SMT. For datatypes with type parameters, the string form of instantiations of type parameters are added to the type name. For example, the type `List<int32u>` is converted to a newly declared type with name `"List<int32u>"` in Z3. This helps to distinguish between different instantiations of the same datatype.
+
+The following rules add identities characterizing the relations between values of a defined type and their fields.
+
+* For each structure literal, add identity rewriting each field of the literal.
+
+    **Example:** for the expression `addrval{{block: b, offset: o}}`, add the following two identities:
+
+    ```
+    addrval{{block: b, offset: o}}.block == b
+    addrval{{block: b, offset: o}}.offset == o
+    ```
+
+* For each structure update, add identity rewriting each field of the update.
+
+    **Example:** for the expression `v{block := b}`, where `v` has type `addrval`, add the following two identities:
+
+    ```
+    v{block := b}.block == b
+    v{offset := o}.offset == v.o
+    ```
+
+* For each equality (including disequality by negation) between two structures, add an identity rewriting the equality to the conjunction of equality of the fields.
+
+    **Example:** for the expression `v1 == v2`, where `v1` and `v2` has type `addrval`, add the following identity:
+
+    ```
+    (v1 == v2) == (v1.block == v2.block && v1.offset == v2.offset)
+    ```
+
+* For each expression formed by constructor of a datatype, add identities relating id and field of the expression.
+
+    **Example:** for the expressions `nil` and `cons(x, xs)`, add the following identities:
+
+    ```
+    nil.id == 0
+    cons(x, xs).id == 1
+    cons(x, xs).head == x
+    cons(x, xs).rest == xs
+    ```
+
+    Note the id's are given as integers starting from 0. For each constructor, only identities for those fields that are present are added (e.g. there is no identity for `nil.head`).
+
+* For each equality (including disequality by negation) between two datatype values, add identity rewriting the equality to equalities between fields conditioned by id.
+
+    In the most general case where neither side of equality is in constructor form (so which branch of the datatype the two sides are on is a priori unknown), each possible case of id need to be considered.
+
+    For datatype that are inductive (i.e. the type itself appears in one of the branches), it is crucial that equalities on the same type in the created identities are not rewritten. This prevents the infinite loop produced by inductive datatypes.
+
+    **Example:** for the expression `xs1 == xs2`, where the two sides have type `List<int32u>`, add the following identity:
+
+    ```
+    (xs1 == xs2) == (
+        xs1.id == xs2.id &&
+        (xs1.id == 0 -> true) &&
+        (xs1.id == 1 -> xs1.head == x2.head && x1.rest == x2.rest)
+    )
+    ```
+
+    Here the equality `x1.rest == x2.rest` are not further expanded to prevent the infinite loop.
+
+* For each (instantiation of type parameters of) algebraic datatype, add inequalities specifying the range of id. In this case, forall-quantification is used, as there is no danger of infinite loops resulting from instantiation.
+
+    **Example:** if the type `List<int32u>` appears in the goal, then the following inequalities are added:
+    
+    ```
+    forall (List<int32u> xs) { xs.id >= 0 && xs.id < 2 }
+    ```
+
+Note the above identities are still written in the original language of OSVAuto. To fully convert into Z3 terms, each field access (including `.id`) is converted into application of uninterpreted functions (with names containing instantiation of type parameters). For example, in the case of `xs` with type `List<int32u>`, `xs.id` is converted into `id<int32u>(xs)`, `xs.head` and `xs.rest` are converted into `head<int32u>(xs)` and `rest<int32u>(xs)`, respectively. The constructors `nil` and `cons` are converted into uninterpreted functions `nil<int32u>` and `cons<int32u>` as well.
+
+**Proof of correctness:** the above identities express the interpretation of structure types and algebraic datatypes: each value of structure type is characterized precisely by the values of its fields, and each value of algebraic datatype is characterized precisely by the index of branches and the values of fields of that index.
+
+The above argument shows the encoding is *sound* but does not mean it is *complete*. In fact because the encoding of equalities do not extend to those recursively generated for inductive datatypes, the encoding is not complete. Decision procedures for (inductive) datatypes are a well-researched problem. More work is needed to add more general (but hopefully still reliably efficient) algorithms to the tool.
+
+### Encoding of maps
+
+As explained in an earlier section, each map type `Map<K,V>` is encoded with two uninterpreted functions `indom<K,V>` and `get<K,V>`. Each function/predicate on maps are expanded into their definitions in terms of `indom` and `get`. The following predicates are currently supported:
+
+* `isEmpty(m)`: whether a map `m` is empty.
+* `subseteq(m1, m2)`: the domain of `m1` is a subset of the domain of `m2`, and the values of `m1` and `m2` are equal on the domain of `m1`.
+* `join(k, v, map_ori, map_new)`: the key `k` is not present in `map_ori`, and adding the key-value pair `(k, v)` to `map_ori` results in `map_new`.
+* `mapUpdate(k, v, map_ori, map_new)`: the key `k` may or may not be present in `map_ori`, but adding/updating the key-value pair `(k, v)` to `map_ori` results in `map_new`.
+* `sigJoin(k, v, sig_map)`: the map `sig_map` consists of a single key-value pair `(k, v)`.
+* `remove(k, map_ori, map_new)`: the key `k` is present in `map_ori`, and removing `k` from `map_ori` results in `map_new`.
+* `mapEq(m1, m2)`: the equality relation on maps, `m1` and `m2` have the same set of keys and have the same value for each key.
+* `disjoint(m1, m2)`: the sets of keys of `m1` and `m2` are disjoint.
+* `merge(m1, m2, m_new)`: the set of keys in `m_new` is the union of sets of keys of `m1` and `m2`, and for each key in each of `m1` and `m2`, the corresponding value in `m1` and `m2` agrees with that in `m_new`. Note this does not require the set of keys in `m1` and `m2` to be disjoint, but the values should agree for each key in the intersection.
+* `minus(m1, m2, m_new)`: the set of keys in `m_new` is the set of keys of `m1` minus the set of keys of `m2`, and for each key in `m_new`, the corresponding value in `m_new` equals that in `m1`.
+
+For each predicate, application of the predicate is expanded into a logical formula in terms of `indom` and `get` *only during SMT encoding*. This keeps the expressions succinct for the user. We give some representative examples for the expansion below.
+
+* Expansion of `mapEq`:
+
+    ```
+    predicate mapEq<K, V>(Map<K, V> m1, Map<K, V> m2) {
+        forall (K k) {
+            indom(k, m1) == indom(k, m2) && 
+            (indom(k, m1) -> get(k, m1) == get(k, m2))
+        }
+    }
+    ```
+
+* Expansion of `join`:
+
+    ```
+    predicate join<K, V>(K key, V value, Map<K, V> map_ori, Map<K, V> map_new) {
+        !indom(key, map_ori) && indom(key, map_new) && get(key, map_new) == value &&
+        forall (K k) {
+            k != key -> indom(k, map_ori) == indom(k, map_new) &&
+                        (indom(k, map_ori) -> get(k, map_ori) == get(k, map_new))
+        }
+    }
+    ```
+
+* Expansion of `mapUpdate`:
+
+    ```
+    predicate mapUpdate<K, V>(K key, V value, Map<K,V> map_ori, Map<K, V> map_new) {
+        indom(key, map_new) && get(key, map_new) == value &&
+        forall (K k) {
+            k != key -> indom(k, map_ori) == indom(k, map_new) &&
+                        (indom(k, map_ori) -> get(k, map_ori) == get(k, map_new))
+        }
+    }
+    ```
+
+**Proof of correctness:** we simply check that the expansion of each predicate correctly expresses the meaning of the predicate. For example, the expansion for `join` asserts that:
+
+* the input key is not in the original map,
+* the input key is in the new map,
+* the value for the input key is correct in the new map,
+* and every key other than the input key is present in the new map if and only if it is present in the old map, and the corresponding values are equal if present.
+
+The expansion of `mapUpdate` is the same as `join`, except there is no requirement on the input key not in the original map. The expansion of `mapEq` asserts that the set of keys are the same, and the corresponding values are equal for each key that is present.
+
+### Encoding of switch statements
+
+For switch statements, we assume that the previous simplification step has already put it in standard form. That is, the switched expression must be an algebraic datatype, and each case is a constructor applied to variables or wildcards, except for the last case which may be default.
+
+A switch expression in standard form is converted into a series of if-then-else statements, depending on the id of the switched expression. For example, the following switched expression on `xs` of type `List<int32u>`:
+
+```
+switch (xs) {
+    case nil: expr1
+    case cons(x, xs2): expr2
+}
+```
+
+is first written in an intermediate form:
+
+```
+if (xs.id == 0) {
+    expr1
+} else {
+    expr2[xs.head/x, xs.rest/xs2]
+}
+```
+
+where the expression in the else-branch means substituting `xs.head` for each appearance of `x` and `xs.rest` for each appearance of `xs2` in `expr2`. This intermediate form is then converted into Z3 by replacing e.g. `xs.id` by `id<int32u>(xs)`, `xs.head` by `head<int32u>(xs)` and `xs.rest` by `rest<int32u>(xs)`.
+
+**Proof of correctness:** for a switch expression in standard form, each case covers exactly one of the branches of the datatype (except possibly for the last default case, which may cover several branches). The fact that a value of algebraic datatype is in one of the branches is equivalent to the id of the value equal to the corresponding integer. Hence it is logically equivalent to convert each case of the switch to an if-expression. The then-branch of the if-expression is the substituted form of the body of the case, in accordance with the interpretation of variables in the pattern, which are bound to the appropriate field of the switched expression in the body.
+
+One important property of the above encoding is that no quantifiers are introduced in the process. Hence, the encoded Z3 goal is quantifier-free if the original goal is, which is advantageous for SMT solvers since they often do not handle quantifiers very well.
+
+### Encoding of quantifiers and existing theorems
+
+If the original goal does have quantifiers, they must be encoded as quantifiers in SMT goals as well. The encoding for unrestricted quantifiers is straightforward. The encoding for restricted quantifiers expands its meaning into unrestricted quantifiers. The following gives the various cases.
+
+* Forall quantification restricted to map:
+
+    ```
+    forall (K key in map) {
+        body
+    }
+    ==>
+    forall (K key) {
+        indom(key, map) -> body
+    }
+    ```
+
+* Exists quantification restricted to map:
+
+    ```
+    exists (K key in map) {
+        body
+    }
+    ==> 
+    exists (K key) {
+        indom(key, map) && body
+    }
+    ```
+
+* Forall quantification restricted to list:
+
+    ```
+    forall (T x in list) {
+        body
+    }
+    ==>
+    forall (T x) {
+        inlist(x, list) -> body
+    }
+    ```
+
+* Exists quantification restricted to list:
+
+    ```
+    exists (T x in list) {
+        body
+    }
+    ==>
+    exists (T x) {
+        inlist(x, list) && body
+    }
+    ```
+
+* Forall quantification restricted to range:
+
+    ```
+    forall (int32u i in range(l, u)) {
+        body
+    }
+    ==>
+    forall (int32u i) {
+        l <= i && i < u -> body
+    }
+    ```
+
+* Exists quantification restricted to range:
+
+    ```
+    exists (int32u i in range(l, u)) {
+        body
+    }
+    ==>
+    exists (int32u i) {
+        l <= i && i < u && body
+    }
+    ```
+
+**Proof of correctness:** by the interpretation of restricted quantification, and interpretation of `range` function.
+
+## Model reconstruction
+
+An important functionality supported by OSVAuto is to provide understandable counterexamples to the user if the SMT solver fails to prove the goal. As long as we are careful in keeping the quantifiers under control, most of the time Z3 will either proof the goal or return a counterexample. However, the counterexample returned by Z3 consists of instantiation of the variables and functions in the encoding, which is a bit far-removed from the original language of OSVAuto. Hence, it is necessary to "undo the encoding" in transforming the counterexample produced by Z3 back into a model in the language of OSVAuto.
+
+The eventual model in OSVAuto should map each variable in the original proof obligation to *fully-evaluated expressions*. These expressions are in one of the following forms:
+
+* Boolean and integer constants.
+* Arrays and maps, where each element in the array, or every key and value in the map are fully-evaluated.
+* Structure literals, where the value of each field is fully-evaluated.
+* Applications of constructor of a datatype, where each argument of the constructor is fully-evaluated.
+* Unknown values (written as `?`), for the case where the validity of the counterexample does not depend on those values.
+
+A simple example of unknown values is as follows. Suppose a structure `struct Point { int32u x; int32u y }` is defined, and the goal to be proved is `x > 0`. Then the returned counterexample may be `Point {{ x: 0; y: ? }}`.
+
+The main work that are necessary to undo the encoding is to interpret the instantiations of new functions produced by the encoding, these include:
+
+* For structures and datatypes, functions for `id` and each `field`. This includes the case of datatype `List`.
+* For arrays, the functions `K` and `Store`.
+* For maps, the functions `indom` and `get`.
+
+Next, we give more details about SMT counterexamples that are specific to Z3, which are assumed in all of the following subsections.
+
+* For each declared sort (such as translated sort of structures and datatypes), each value of that sort has the form `{sortName}!val!{index}`. For example, values of datatype `addrval` in the counterexample produced by Z3 has names `addrval!val!0`, `addrval!val!1`, and so on. Note if the type has parameters, the type name include instantiations of the parameters. For example, values of `List<int32u>` in the Z3 counterexample has names `List<int32u>!val!0`, etc.
+
+    An implication for this convention is that by scanning through a Z3 expression, we can collect values of each declared type appearing in the expression. We do this for each expression in the Z3 model, and use this information in the decoding of maps.
+
+* For each declared (uninterpreted) function, such as the `indom` and `map` functions produced by encoding of maps, the value produced by Z3 is a finite representation of a function. This function usually has the following form: a pair of key-value pairs that give values for certain inputs, followed by an *else* branch that give the default value, or further evaluation rules depending on the input parameters. Usually, we don't need to be concerned about exact representation of functions, as the Z3 provides an API for evaluating the function on concrete inputs.
+
+### Reconstruction for structures
+
+For a structure value, we look for functions corresponding to each field of the structure, and evaluate the Z3 function on the Z3 value. As an example, consider the following test case: the theory is extended by structure definition for `Point`:
+
+```
+struct Point {
+    int32u x;
+    int32u y;
+}
+```
+
+and the query is:
+
+```
+query testStructPoint {
+    fixes p: Point;
+    fixes q: Point;
+    assumes p.x == 2 && p.y == 3 && q.x == 4 && q.y == 5
+}
+```
+
+The model returned by Z3 is as follows:
+
+```
+[p = Point!val!0,
+ q = Point!val!1,
+ Point.y = [Point!val!1 -> 5, else -> 3],
+ Point.x = [Point!val!1 -> 4, else -> 2]]
+```
+
+This means `p` and `q` are values of declared sort `Point` with index 0 and 1 respectively. The fields `x` and `y` of `Point` are represented as functions mapping `Point` values to values of its fields. Reconstruction from this model proceeds by the following steps:
+
+1. For point `p` with Z3 value `Point!val!0`, evaluate functions `Point.x` and `Point.y` on `Point!val!0`, yielding 2 and 3 respectively. So point `p` has value `Point{{x: 2, y: 3}}`.
+
+2. For point `q` with Z3 value `Point!val!1`, evaluate functions `Point.x` and `Point.y` on `Point!val!1`, yielding 4 and 5 respectively. So point `q` has value `Point{{x: 4, y: 5}}`.
+
+### Reconstruction for datatypes
+
+Reconstruction for datatypes differs from that for structures only in the need to evaluate `id`. For each datatype value, first the Z3 function for `id` is evaluated, giving which branch of the datatype the value is on. Then each field of that branch is evaluated. Again, we give a concrete example as follows.
+
+Suppose the theory is extended by datatype definition for `Point`:
+
+```
+datatype Point =
+    PointA(int32u x, int32u y) | PointB (int32u x, int32u z)
+```
+
+and the query is:
+
+```
+query testDatatype {
+    fixes v: Point;
+    fixes w: Point;
+    assumes v == PointA(2, 3) && w == PointB(4, 5)
+}
+```
+
+The model returned by Z3 is as follows:
+
+```
+[w = Point!val!1,
+ v = Point!val!0,
+ Point.id = [Point!val!0 -> 0, else -> 1],
+ Point.z = [else -> 5],
+ Point.y = [else -> 3],
+ PointB = [else -> Point!val!1],
+ PointA = [else -> Point!val!0],
+ Point.x = [Point!val!1 -> 4, else -> 2]]
+```
+
+This means `v` and `w` are values of declared sort `Point` with index 0 and 1, respectively. The fields `x`, `y` and `z` are represented as functions mapping `Point` values to values of its fields. The `id` of each `Point` value are given by the Z3 function `Point.id`. Reconstruction from this model proceeds by the following steps:
+
+1. For point `v` with Z3 value `Point!val!0`, first evaluate `Point.id` on `Point!val!0`, yielding value 0. This means `v` is on the branch `PointA`, with fields `x` and `y`. Then evaluate functions `Point.x` and `Point.y` on `Point!val!0`, yielding values 2 and 3 respectively. So point `v` has value `PointA(2, 3)`.
+
+2. For point `w` with Z3 value `Point!val!1`, first evaluate `Point.id` on `Point!val!1`, yielding value 1. This means `w` is on the branch `PointB`, with fields `x` and `z`. Then evaluate functions `Point.x` and `Point.z` on `Point!val!1`, yielding values 4 and 5 respectively. So point `w` has value `PointB(4, 5)`.
+
+We give one more example illustrating reconstruction for a datatype with recursion and type parameters. The test query is:
+
+```
+query testDatatype {
+    fixes xs : List<int32u>;
+    assumes xs == [1, 2]
+}
+```
+
+The model returned by Z3 has the following form (the complicated value for `List.id` is omitted).
+
+```
+[xs = List<int32u>!val!2,
+ nil<int32u> = List<int32u>!val!0,
+ v = List<int32u>!val!3,
+ List.id<int32u> = [...],
+ List.rest<int32u> = [List<int32u>!val!1 ->
+                      List<int32u>!val!0,
+                      else -> List<int32u>!val!1],
+ List.ele<int32u> = [List<int32u>!val!2 -> 1, else -> 2],
+ cons<int32u> = [(1, List<int32u>!val!1) ->
+                 List<int32u>!val!2,
+                 else -> List<int32u>!val!1]]
+```
+
+Reconstruction of this model proceeds as follows.
+
+1. The only variable is `xs`, with Z3 value `List<int32u>!val!2`. First evaluate `List.id<int32u>` on `List<int32u>!val!2`, which yields 1. So `xs` is on the cons branch. Then evaluate `List.ele<int32u>` and `List.rest<int32u>` on `List<int32u>!val!2`, yielding 1 and `List<int32u>!val!1` respectively. This means `xs` has form `cons(1, xs2)` where `xs2` has Z3 value `List<int32u>!val!1`.
+
+2. Next, evaluate `List.id<int32u>` on `List<int32u>!val!1`, which yields 1. So `xs2` is on the cons branch. Then evaluate `List.ele<int32u>` and `List.rest<int32u>` on `List<int32u>!val!1`, yielding 2 and `List<int32u>!val!0` respectively. This means `xs2` has form `cons(2, xs3)` where `xs3` has Z3 value `List<int32u>!val!0`.
+
+3. Finally, evaluate `List.id<int32u>` on `List<int32u>!val!0`, which yields 0. This means `xs3` is nil, which completes the reconstruction, giving `xs` having value `cons(1, cons(2, nil))`, or `[1, 2]` using syntax sugar.
+
+### Reconstruction for arrays
+
+The model for arrays is already in evaluated form, consisting of `K` and `Store` functions. For example, with the following test query:
+
+```
+query testArray {
+    fixes a : int32u[];
+    fixes x : int32u;
+    fixes y : int32u;
+    assumes x == 0 && y == 1;
+    assumes a[x] == 1 && a[y] == 3
+}
+```
+
+the model returned by Z3 is:
+
+```
+[y = 1, x = 0, a = Store(K(Int, 3), 0, 1)]
+```
+
+This means `a` is an array with value 3 everywhere, except the value at index 0 is updated to 1. The corresponding value in OSVAuto is `Store(K(3), 0, 1)`, or `K(3)[0 := 1]` using syntax sugar.
+
+### Reconstruction for maps
+
+The main work that need to be done to reconstruct models for maps is to evaluate the corresponding indom and get functions. One difficulty is to obtain the list of potential keys. For this purpose, we scan through the Z3 expression for each function, looking for values of declared sorts as well as of primitive types in the expression.
+
+First consider an example where the keys are of primitive type. The test query is:
+
+```
+query testMap {
+    fixes x: int32u;
+    fixes y: int32u;
+    fixes z: int32u;
+    fixes m: Map<int32u, int32u>;
+    assumes indom(x, m) && indom(y, m) && indom(z, m);
+    assumes get(x, m) == 1 && get(y, m) == 2 && get(z, m) == 3
+}
+```
+
+The model returned by Z3 is:
+
+```
+[m = Map<int32u,int32u>!val!0,
+ y = 1,
+ x = 2,
+ z = 0,
+ indom<int32u,int32u> = [else -> True],
+ get<int32u,int32u> = [(1, Map<int32u,int32u>!val!0) -> 2,
+                       (0, Map<int32u,int32u>!val!0) -> 3,
+                       else -> 1]]
+```
+
+First, we go through each Z3 expression in the model, collecting atomic subexpressions of type int32u. These are 0, 1, and 2. Then, for variable `m` with Z3 value `Map<int32u,int32u>!val!0`, first evaluate `indom` on each of 0, 1, and 2, which yields true for all three values. Then, evaluate `get` on each of 0, 1, and 2, which yields 3, 2, 1 respectively. So the model for `m` is `{0: 3, 1: 2, 2: 1}`.
+
+For this example, Z3 chooses to return an `indom` that is true on all keys. However, we don't care about keys not present in the model, and still return a finite map with keys containing all `int32u` values appearing in the model.
+
+Finally, we consider an example where keys to the map are defined types. Again extend the theory with structure `Point`. The test query is:
+
+```
+query testMap2 {
+    fixes p: Point;
+    fixes q: Point;
+    fixes m: Map<Point, int32u>;
+    assumes p == Point {{x: 0, y: 1}};
+    assumes q == Point {{x: 2, y: 3}};
+    assumes indom(p, m) && get(p, m) == 0;
+    assumes indom(q, m) && get(q, m) == 1
+}
+```
+
+The Z3 model is (with some irrelevant values omitted):
+
+```
+m = Map<Point,int32u>!val!0
+p = Point!val!0
+q = Point!val!1
+get<Point,int32u> = [
+    (Point!val!1, Map<Point,int32u>!val!0) -> 1,
+    else -> 0]
+indom<Point,int32u> = [else -> True]
+Point.y = [Point!val!1 -> 3, else -> 1]
+Point.x = [Point!val!1 -> 2, else -> 0]
+```
+
+First, we collect atomic values of type `Point` among the Z3 model, yielding `Point!val!0` and `Point!val!1`. Evaluating `indom` on these two values and value for `m`, we found both appear as keys in the map `m`. Then evaluate `get` on these two values and value for `m`, yielding the value for `Point!val!0` is 0 and value for `Point!val!1` is 1. Further evaluating `Point!val!0` and `Point!val!1` (according the rules for evaluating structures), we found they have value `Point{{x: 0, y: 1}}` and `Point{{x: 2, y: 3}}` respectively. So the full model for `m` is:
+
+```
+{
+    Point{{x: 2, y: 3}}: 1,
+    Point{{x: 0, y: 1}}: 0,
+}
+```
+
 ## Tactics
 
-In this section, we describe the tactic language in OSVAuto.
+While the use of SMT solvers substantially increases the level of proof automation, there are still some proof obligations that is outside the capability of current SMT solvers. In particular, we cannot expect SMT solvers to perform inductive proofs, and they can easily be confused by a large number of quantified facts. Hence, we still allow the user to guide the proof using a tactic language. The tactic language in OSVAuto is in part inspired by that in Coq and Isabelle, but we also make changes so it fits better with stronger proof automation (and hence short manual proofs in general), and to avoid some of the problems encountered in existing proof assistants.
 
-**auto**: invokes the SMT solver on the current proof state, takes an optional list of theorems, which are also given as input to the SMT solver.
-```
-$ auto
+### Proof states
 
-$ auto (theorem)
-```
-**cases**: correspond to case analysis and induction on an algebraic datatype, respectively. Both tactics are followed by a list of branches with corresponding tactics, 
-where each branch either correspond to a constructor of the datatype or is the default branch.
-```
-$ cases(vptr) {
-    case Vptr(eid):
-      tactics;;
-      ...
-    default: ...
-```
-**simplify**: unfolds any term which can be unfolds indeed, and rewrite some term into simple form
+Before introducing tactics, we first discuss the concept of *proof states* in OSVAuto. In contrast to the notion of proof states in most other proof assistants, where a proof state simply consists of the current list of assumptions and goal, a proof state in OSVAuto maintains information about all current subgoals together with branching information. (A more appropriate analogy is to the list of currently open subgoals in Coq or Isabelle, but with additional branching information.)
 
-**induction** apply induction on a term that has recursive datatype, x is the var to ind, y and z is to be skolemized by needs:
+The list of possible types of proof states is as follows. In the implementation, the base class of proof states is `AbstractProofState`. The class for each type of proof state extends `AbstractProofState`, with the class name given in parenthesis.
+
+* Empty state (`EmptyProofState`): indicates a proof state that has already been resolved (e.g. there are zero subgoals remaining).
+
+* Case branching (`CaseProofState`): indicates a proof state resulting from applying case analysis or induction on an algebraic datatype. It consists of one branch for each constructor of the datatype, with name of the constructor and list of variables for the argument of the constructor. These variables are newly introduced and the proof state of the branch as its scope.
+
+* Indexed branching (`IndexProofState`): indicates a proof state resulting from applying some tactic that results in a number of subgoals. It consists of a number of proof states indexed by integers starting from 1. Each proof state corresponds to a subgoal generated by the tactic.
+
+* Assertion branching (`AssertProofState`): indicates a proof state resulting from applying the assert tactic, or another tactic that first asserts some proposition to be true, then uses that proposition to transform the goal. It consists of two branches: the `assert_case` for proving the asserted proposition, and the `remain_case` for proving the resulting subgoal.
+
+* Basic state (`ProofState`): this is the most basic kind of proof state, with the same components as a query (except it has no name): type parameters, variables, assumptions, and conclusion.
+
+Initially, a basic state is created from a query. Then, tactics are applied to the proof state, until all leaves in the tree of proof states are empty states. On the other hand, the number of leaves that are basic state is the number of remaining subgoals in the proof.
+
+### List of tactics
+
+We now discuss each of the tactics that we currently support. An overview table is as follows.
+
+| Tactic | Description |
+| ------ | ----------- |
+| Skip   | do nothing |
+| Then   | apply two tactics in sequence |
+| ThenSplit | apply one tactic, followed by tactics for each case |
+| Auto   | use SMT solver to solve goal |
+| Simplify | simplify the current proof state |
+| Exists | provide witness for existence goal by hand |
+| Skolemize | create fresh variables from existence fact |
+| Assert | assert proposition, then add it to assumption |
+| Change | assert equality, then use it to rewrite goal |
+| Assumption | use one of the assumptions to solve goal |
+| SplitConj | split conjunction in goal |
+| MatchShow | match existential goal statement with assumption |
+| ApplyTheorem | apply existing theorem or fact |
+| Cases  | apply case analysis |
+| Induction | apply induction |
+
+Next, we describe each of the tactics in detail, including syntax in the tactic language, possible parameters, and so on.
+
+#### Skip
+
+* Syntax: `skip`
+* Leave the current proof state unchanged, usually used as a placeholder for when a tactic is needed but it is unclear what to do.
+
+#### Then
+
+* Syntax: `tac1 ;; tac2`
+* First perform `tac1`, then perform `tac2`. The tactic `tac1` *must* result in a basic proof state (no branching), otherwise an exception is raised.
+
+#### ThenSplit
+
+* Syntax: `tac { 1: tac1; 2: tac2; ... }`
+* First perform `tac`. It must create an indexed proof state (otherwise an exception is raised). Then apply `tac1`, `tac2`, etc to each indexed branch. It is also possible to use `default: tac'` to apply `tac'` to all remaining branches.
+
+#### Auto
+
+* Syntax: `auto` or `auto(thm_specs)`
+* Apply SMT solver. The auto tactic optionally takes a list of theorem names as argument. If the theorem has type parameters, instantiations of type parameters *must* be provided. For example, to add the simplification rules for `inlist` with type argument `int32u`, use:
+
+    ```
+    auto(inlist_simps1<int32u>, inlist_simps2<int32u>)
+    ```
+
+    If SMT solver successfully solves the goal, the proof state is transformed into empty state. Otherwise an exception is raised, together with possible counterexample given by the SMT solver. (It is not possible for `auto` to be partially applied, leaving an intermediate proof state).
+
+#### Simplify
+
+* Syntax: `simplify`
+* Apply simplification to all assumptions and conclusion in the proof state. This is the same simplification that is performed before SMT encoding.
+
+#### Exists
+
+* Syntax: `exists(args)`
+* Provide witness for existence goal by hand. The list of arguments `args` is a comma-separated list of expressions, which must equal the number of exists quantifiers in the current subgoal.
+
+#### Skolemize
+
+* Syntax: `skolemize(name, [vars])`
+* Create fresh variable from an existence fact. The argument `name` provides name of the fact (which must be named for this tactic to be used). The list of variables `vars` is a comma separated list of `type var_name` declarations. For example, given existence fact
+
+    ```
+    H1: exists (int32u x, int32u y) { x + y > 0 }
+    ```
+
+    Using the tactic `skolemize(H1, [int32u x0, int32u y0])`, we transform the proof state into:
+
+    ```
+    fixes x0 : int32u
+    fixes y0 : int32u
+    H1: x0 + y0 > 0
+    ```
+
+#### Assert
+
+* Syntax: `assert (name: prop) { tac1 };; tac2`
+* Assert the given proposition `prop`, use tactic `tac1` to prove the proposition, then apply tactic `tac2` on the proof state obtained by adding `prop` as one of the assumptions with given the `name`. This tactic transforms a basic proof state into an assertion branching.
+
+#### Change
+
+* Syntax: `change (prop) { tac1 };; tac2`
+* Assert the given equality proposition `prop`, use tactic `tac1` to prove the equality, then apply tactic `tac2` on the proof state obtained by applying the equality to rewrite the current proof state. This tactic transforms a basic proof state into an assertion branching.
+
+#### Assumption
+
+* Syntax: `assumption`
+* Try to find current goal in the list of assumptions. If it is found, change the proof state into empty state. Otherwise raise an exception.
+
+#### SplitConj
+
+* Syntax: `split_conj(name, [names])`
+* Split the conjunction in the given assumption. The name of the original assumption is given as `name`. The name of new assumptions are given in the list `names`, whose length must match the number of conjuncts in the original assumption.
+
+#### MatchShow
+
+* Syntax:
+
+    1. `match_show(name);; tac` or
+    2. `match_show(name) {1: tac1; 2: tac2; ...}`
+
+* Match existential goal statement with the given assumption. The goal must be in the form `exists (v_1, ..., v_n) {Q_1 && ... && Q_k}`. Match one of the patterns `Q_i` with the named assumption in order to instantiate the variables `v_1, ..., v_n`. The remaining conjuncts of the goal are instantiated and left as subgoals.
+
+    If the tactic results in a single subgoal, the first version of syntax is used. If it results in more than one subgoal, the second version is used.
+
+#### ApplyTheorem
+
+* Syntax:
+
+    1. `apply_theorem(name, [facts]);; tac` or
+    2. `apply_theorem(name, [facts]);; {1: tac1; 2: tac2; ...}`
+
+* Apply theorem with the given name, or assumption with given label on the current proof state. The optional list of facts provides additionally instantiations for the assumptions of the theorem in order. If no fact is available for one of the assumptions, the wildcard `_` can be used as placeholder.
+
+    If the tactic results in a single subgoal, the first version of syntax is used. If it results in more than one subgoal, the second version is used.
+
+#### Casees
+
+* Syntax:
+
 ```
-$ induction(x, [y, z])
+cases(e) {
+    case constr1: tac1;
+    case constr2: tac2;
+    ...
+}
 ```
-**split_conj**: splits a assumption into serval assumptions:
+
+* Apply case analysis on an expression `e` whose type is an algebraic datatype. Following `cases` is a list of branches, one for each constructor of the datatype. Each branch is specified by the constructor name, possible list of variable arguments, and tactic used to solve that branch. It is also possible to use `default: tac'` to apply `tac'` to all remaining branches.
+
+#### Induction
+
+* Syntax:
+
 ```
-$ split_conj(H1, [H11, H22])
+induction(e, [arbitraries]) {
+    case constr1: tac1;
+    case constr2: tac2;
+    ...
+}
 ```
-There is a ';;' between each tactic command, and a ';' in the end of a proof state of a finished sub-goal like:
+
+* Apply induction on an expression `e` whose type is an algebraic datatype. Following `induction` is a list of branches, one for each constructor of the datatype. Each branch is the same as that for tactic `cases`, except an addition induction hypothesis is available. The naming convention for each induction hypothesis is `IH_{var_name}`, where `var_name` is the name of the variable argument which created the induction hypothesis.
+
+    Moreover, an optional list of arbitrary variables may be specified after the expression to be inducted upon. These variables will be for-all quantified to create the statement to be proved by induction.
+
+### Examples
+
+We use some examples of theorems about lists to illustrate our tactic language.
+
+We assume that standard functions on lists `append` and `rev` has already been defined. For the query:
+
 ```
-$ induction(tcbList, [vptr, tcbls]) {
-    case nil: auto;
-    case cons(tcb, rest):
-        cases(vptr) {
-            case Vptr(tid):
-                simplify;;
-                skolemize;;
-                split_conj(H2, [H21, H22, H23]);;
-                match_show(H23) {
-                    1: apply_theorem(TCBNode_P_prioneq_prop_hold, [_, H3, H21]);;
-                       auto;
-                    2: apply_theorem(IH_rest, [_, H22]);;
-                       apply_theorem(map_get_test, [H23, H1]);
-                };
-            default: auto;
-        };
-  }
+query append_nil_right {
+    type T;
+    fixes xs: List<T>;
+    shows append(xs, nil) == xs
+}
+```
+
+It suffices to perform induction on variable `xs`, then the rest can be handled by an SMT solver. So the proof is:
+
+```
+proof { induction (xs) {default: auto;} }
+```
+
+Likewise, the following query, stating associativity of list append, is proved similarly.
+
+```
+query append_assoc {
+    type T;
+    fixes xs: List<T>;
+    fixes ys: List<T>;
+    fixes zs: List<T>;
+    shows append(append(xs, ys), zs) == append(xs, append(ys, zs)) 
+    proof { induction (xs) {default: auto;} }
+}
+```
+
+Now we come to the interesting parts. For the query about relation between `rev` and `append`:
+
+```
+query rev_append {
+    type T;
+    fixes xs: List<T>;
+    fixes ys: List<T>;
+    shows rev(append(xs, ys)) == append(rev(ys), rev(xs))
+}
+```
+
+Suppose we know the first step is to perform induction on `xs`, but don't know what to do afterwards, we can preliminarily write the proof as:
+
+```
+proof {
+    induction(xs) {
+        case nil: skip;
+        case cons(x, xs): skip;
+    }
+}
+```
+
+Running OSVAuto, the tool will indicate that two subgoals are remaining, together with an hierarchical display of the subgoals:
+
+```
+nil {
+  type T
+  fix ys: List<T>
+  prove rev(append([], ys)) == append(rev(ys), rev([]))
+}
+cons(x, xs) {
+  type T
+  fix ys: List<T>
+  fix x: T
+  fix xs: List<T>
+  assume IH_xs: rev(append(xs, ys)) == append(rev(ys), rev(xs))
+  prove rev(append(cons(x, xs), ys)) == append(rev(ys), rev(cons(x, xs)))
+}
+```
+
+It indicates that the first subgoal corresponds to the nil case, and the second subgoal for the cons case, with `x` and `xs` as the fresh variables. The nil case can be proved by adding theorem `append_nil_right` instantiated to type `T`. The cons case can be proved by adding theorem `append_assoc` instantiated to type `T`. Hence, the full proof is:
+
+```
+proof {
+    induction(xs) {
+        case nil: auto(append_nil_right<T>);
+        case cons(x, xs): auto(append_assoc<T>);
+    }
+}
+```
+
+Finally, to show that reversing a list twice yields the original list:
+
+```
+query rev_rev {
+    type T;
+    fixes xs: List<T>;
+    shows rev(rev(xs)) == xs
+}
+```
+
+It is known that induction on `xs` should be used, and the theorem `rev_append` should be used in the cons case. The remaining case (for nil) can be proved by SMT directly. So the proof can be written as:
+
+```
+proof {
+    induction(xs) {
+        case cons(x, xs): auto(rev_append<T>);
+        default: auto;
+    }
+}
 ```

@@ -686,7 +686,7 @@ class MatchShow(Tactic):
     """Match existential goal statement with one of the assumptions.
 
     For a goal of the form
-        exists v_1 .. v_n. Q_1 && Q_2 && ... && Q_k
+        exists (v_1, ..., v_n) { Q_1 && Q_2 && ... && Q_k }
     and assumption of the form P, match one of the patterns Q_i with P in order
     to instantiate variables v_1, ..., v_n. For each match on Q_i, change the
     proof state to one subgoal for instantiation of Q_j for each j != i.

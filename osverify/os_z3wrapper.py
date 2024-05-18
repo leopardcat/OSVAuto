@@ -806,10 +806,7 @@ def solve_model(thy: os_theory.OSTheory, query: os_query.Query, *,
     if isinstance(res, UnsatResult):
         raise AssertionError("solve_model: constraints are unsatisfiable")
     elif isinstance(res, ModelResult):
-        if verbose:
-            print('---- Raw model ----')
-            print(res.model)
-        model = convert_model(thy, query.type_params, query.fixes, res.model, verbose=False)
+        model = convert_model(thy, query.type_params, query.fixes, res.model, verbose=verbose)
         return model
     else:
         raise NotImplementedError
@@ -944,7 +941,10 @@ def get_model_for_val(thy: os_theory.OSTheory,
         elif ty.name == "Map":
             key_ty, value_ty = ty.params
             values: List[Tuple[OSTerm, OSTerm]] = list()
-            type_name = str(get_Z3type(thy, key_ty))
+            if isinstance(key_ty, (os_struct.OSStructType, os_struct.OSHLevelType)):
+                type_name = str(get_Z3type(thy, key_ty))
+            elif isinstance(key_ty, os_struct.OSPrimType):
+                type_name = str(key_ty)
             assert type_name in type_map, "type %s not found in type_map" % type_name
             for key_val in type_map[type_name]:
                 indom_f = z3.Function(
@@ -976,7 +976,8 @@ def get_model_for_val(thy: os_theory.OSTheory,
         raise NotImplementedError("get_model_for_val for type %s" % ty)
 
 def parse_z3_var(name: str) -> Optional[int]:
-    """Parse expression of the form Var(n).
+    """Parse expression of the form Var(n). These represent input arguments
+    to Z3 functions.
     
     If successful, return the integer. Otherwise, return None.
     
@@ -988,7 +989,8 @@ def parse_z3_var(name: str) -> Optional[int]:
         return None
 
 def parse_z3_const(name: str) -> Optional[str]:
-    """Parse expression of the form <type>!val!n.
+    """Parse expression of the form <type>!val!n. These represent values of
+    declared sorts in Z3.
     
     If successful, return the name of the type. Otherwise, return None.
     
@@ -999,15 +1001,26 @@ def parse_z3_const(name: str) -> Optional[str]:
     return name[:pos]
 
 def analyze_z3_expr(expr: z3.Z3PPObject, type_map: Dict[str, List[z3.Z3PPObject]]):
+    """For each declared sort, add list of values appearing in the Z3
+    expression that has that type. Place the result in type_map.
+
+    """
     if isinstance(expr, z3.ExprRef):
         childs = expr.children()
         if len(childs) == 0:
-            ty = parse_z3_const(str(expr))
-            if ty is not None:
-                if ty not in type_map:
-                    type_map[ty] = list()
-                if expr not in type_map[ty]:
-                    type_map[ty].append(expr)
+            if isinstance(expr, z3.BitVecNumRef):
+                bv_type = str(os_struct.get_bv_type(expr.size()))
+                if bv_type not in type_map:
+                    type_map[bv_type] = list()
+                if expr not in type_map[bv_type]:
+                    type_map[bv_type].append(expr)
+            else:
+                ty = parse_z3_const(str(expr))
+                if ty is not None:
+                    if ty not in type_map:
+                        type_map[ty] = list()
+                    if expr not in type_map[ty]:
+                        type_map[ty].append(expr)
         else:
             for child in expr.children():
                 analyze_z3_expr(child, type_map)
@@ -1057,6 +1070,8 @@ def convert_model(thy: os_theory.OSTheory,
                 analyze_z3_expr(pair[0], type_map)
                 analyze_z3_expr(pair[1], type_map)
             analyze_z3_expr(lst[-1], type_map)
+        else:
+            analyze_z3_expr(val, type_map)
 
     if verbose:
         print('--- type_map ---')
