@@ -997,16 +997,6 @@ predicate RLH_ECBData_P (EVENT event, AbsECB absecb) {
     }
 }
 
-predicate RLH_ECBData_P_All(Global global, AbsGlobal absGlobal) {
-    forall (address eid in global.events) {
-        indom(eid, absGlobal.ecbMap) &&
-        RLH_ECBData_P(get(eid, global.events), get(eid, absGlobal.ecbMap))
-    } &&
-    forall (address eid in absGlobal.ecbMap) {
-        indom(eid, global.events)
-    }
-}
-
 /*
  * The following series of predicates relate the high-level task and event
  * information.
