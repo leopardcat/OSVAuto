@@ -1,21 +1,10 @@
 // Type of pairs
-datatype Prod<U, V> =
+enum Prod<U, V> =
     pair (U fst, V snd)
 
-// Type of natural numbers
-datatype nat =
-    zero
-    | succ (nat n)
-
-// List datatype
-datatype List<E> =
-    nil
-    | cons (E ele, List<E> rest)
-
 // Option datatype
-datatype Option<T> =
-    none
-    | some (T val)
+enum Option<T> =
+    none | some (T val)
 
-// Range function
-axiomfunc range : int32u -> int32u -> List<int32u>
+axiomfunc max : int -> int -> int
+axiomfunc min : int -> int -> int

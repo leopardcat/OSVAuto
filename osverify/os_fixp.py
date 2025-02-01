@@ -2,7 +2,7 @@
 Definition of function
 """
 
-from typing import Iterable, Tuple
+from typing import Iterable
 from osverify import os_term
 from osverify import os_struct
 from osverify.os_util import indent

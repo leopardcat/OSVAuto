@@ -10,6 +10,20 @@ We assume relatively new versions of Python (version 3.12 is suggested). The too
 pip install -r requirements.txt
 ```
 
+## Check a single theory or lemma
+
+To check a theory file, place the file in the `osverify/theory` folder. Then use:
+
+```bash
+python -m run --theory <theory_name>
+```
+
+To check a single lemma in the theory, use:
+
+```bash
+python -m run --theory <theory_name> --lemma <lemma_name>
+```
+
 ## Running tests
 
 Run all unit tests using the following:

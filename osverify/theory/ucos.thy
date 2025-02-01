@@ -1,269 +1,436 @@
 imports basic
-imports ucosData
 
+// Pointer values: each pointer is either null or an address
+typedef address = int32u;
+enum addrval =
+    Vnull
+  | Vptr(address addr)
+
+/********************
+ * Low level state  *
+ ********************/
+
+// Low-level task control block
+struct TCB {
+    addrval OSTCBEventPtr;      // pointer to event control block
+    addrval OSTCBMsg;           // received message
+    int16u OSTCBDly;            // time delay
+    int16u OSTCBStat;           // task status
+    int8u OSTCBPrio;            // priority (0..63)
+    int8u OSTCBX;               // bit position in group (0..7)
+    int8u OSTCBY;               // index into ready table
+    int8u OSTCBBitX;            // bit mask in ready table
+    int8u OSTCBBitY;            // bit mask in ready group
+}
+
+// Constants for low-level task status
+const int16u OS_STAT_RDY = 0;
+const int16u OS_STAT_SEM = 1;
+const int16u OS_STAT_MBOX = 2;
+const int16u OS_STAT_Q = 4;
+const int16u OS_STAT_SUSPEND = 8;
+const int16u OS_STAT_MUTEX = 16;
+
+// Lowest priority (idle priority)
+const int8u OS_LOWEST_PRIO = 63;
+const int8u OS_IDLE_PRIO = 63;
+
+// Low-level queue data
+struct OS_Q {
+    int OSQIn;           // input position
+    int OSQOut;          // output position
+    int OSQEntries;      // current number of entries in the queue
+    Seq<addrval> OSQData;   // list of messages in the queue
+}
+
+// Constants for low-level event type
+const int8u OS_EVENT_TYPE_UNUSED = 0;
+const int8u OS_EVENT_TYPE_MBOX = 1;
+const int8u OS_EVENT_TYPE_Q = 2;
+const int8u OS_EVENT_TYPE_SEM = 3;
+const int8u OS_EVENT_TYPE_MUTEX = 4;
+
+// Low-level event control block
+struct EVENT {
+    int8u OSEventType;          // type of event control block, one of OS_EVENT_TYPE_UNUSED, etc.
+    int8u OSEventGrp;           // ready group of tasks waiting for event
+    int16u OSEventCnt;          // semaphore count (for semaphore) or mutex priority (for mutex)
+    addrval OSEventPtr;         // pointer to message (for mailbox)
+    Seq<int8u> OSEventTbl;      // ready table of tasks waiting for event (size 8)
+    Option<OS_Q> OSQueue;       // queue data
+}
+
+// Tables used in computations concerning priority table
+const Seq<int8u> OSMapTbl = [
+    1, 2, 4, 8, 16, 32, 64, 128
+];
+
+const Seq<int8u> OSUnMapTbl = [
+    0, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0,       /* 0x00 to 0x0F                             */
+    4, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0,       /* 0x10 to 0x1F                             */
+    5, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0,       /* 0x20 to 0x2F                             */
+    4, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0,       /* 0x30 to 0x3F                             */
+    6, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0,       /* 0x40 to 0x4F                             */
+    4, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0,       /* 0x50 to 0x5F                             */
+    5, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0,       /* 0x60 to 0x6F                             */
+    4, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0,       /* 0x70 to 0x7F                             */
+    7, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0,       /* 0x80 to 0x8F                             */
+    4, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0,       /* 0x90 to 0x9F                             */
+    5, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0,       /* 0xA0 to 0xAF                             */
+    4, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0,       /* 0xB0 to 0xBF                             */
+    6, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0,       /* 0xC0 to 0xCF                             */
+    4, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0,       /* 0xD0 to 0xDF                             */
+    5, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0,       /* 0xE0 to 0xEF                             */
+    4, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0        /* 0xF0 to 0xFF                             */
+];
+
+// Low-level global state
+struct Global {
+
+    // Task control blocks
+    Map<int8u, TCB> OSTCBPrioTbl;       // map priority to TCB pointer
+
+    // Priority map
+    int8u OSRdyGrp [binary];        // ready list group
+    Seq<int8u> OSRdyTbl;            // table of tasks which are ready to run
+
+    // Map of events
+    Map<address, EVENT> events;
+
+    // Time counter
+    int32u OSTime;                  // current time
+
+    // Current and highest-priority running tasks
+    int8u OSPrioCur;                // priority of current running task
+    int8u OSPrioHighRdy;            // priority of highest-priority ready task
+}
+
+/********************
+ * High level state *
+ ********************/
+
+// High-level task status
+enum tcbstats =
+    os_stat_sem (address ev)
+  | os_stat_q (address ev)
+  | os_stat_time
+  | os_stat_mbox (address ev)
+  | os_stat_mutexsem (address ev)
+
+enum taskstatus =
+    rdy | wait(tcbstats stat, int16u time)
+
+// High-level task control block
+struct AbsTCB {
+    int8u prio;
+    taskstatus stat;
+    addrval msg;
+    bool sus;
+}
+
+/*
+ * Abstract event data
+ *
+ * For semaphore, specifies semaphore count.
+ * For message queue, specifies list of messages and maximum size of the queue,
+ * For mailbox, address to the message.
+ * For mutex, priority inheritance priority (pip) of the mutex, original priority
+ *            of owner, and whether the mutex is owned.
+ */
+enum eventdata =
+    abssem(int16u count)
+  | absmsgq(Seq<addrval> msgl, int qsize)
+  | absmbox(addrval msg)
+  | absmutexsem(int16u prio, int16u oprio, bool owned)
+
+/*
+ * Abstract event control block
+ *
+ * Specifies event information, and list of tasks waiting for the event.
+ */
+struct AbsECB {
+    eventdata edata;
+    Seq<int8u> wset;
+}
+
+// High-level global state
+struct AbsGlobal {
+    Map<int8u, AbsTCB> tcbMap;      // address to task control block
+    Map<address, AbsECB> ecbMap;    // address to event control block
+    int32u curTime;                 // current time
+    int8u curTask;                  // current running task
+}
+
+/************************
+ * Low-level invariants *
+ ************************/
+
+// Constraint on the low-level task control block
 predicate RL_TCBblk_P (TCB tcb) {
-    0 <= tcb.prio && tcb.prio < 64 &&
-    tcb.prio & 7 == tcb.x &&
-    tcb.prio >> 3 == tcb.y &&
-    1 << tcb.x == tcb.bitx &&
-    1 << tcb.y == tcb.bity &&
-    (tcb.stat == OS_STAT_RDY || tcb.stat == OS_STAT_SUSPEND ||
-        tcb.stat == OS_STAT_SEM || tcb.stat == OS_STAT_Q ||
-        tcb.stat == OS_STAT_MBOX || tcb.stat == OS_STAT_MUTEX ||
-        tcb.stat == OS_STAT_SEM | OS_STAT_SUSPEND ||
-        tcb.stat == OS_STAT_Q | OS_STAT_SUSPEND ||
-        tcb.stat == OS_STAT_MBOX | OS_STAT_SUSPEND ||
-        tcb.stat == OS_STAT_MUTEX | OS_STAT_SUSPEND) &&
-    ((tcb.stat == OS_STAT_RDY || tcb.stat == OS_STAT_SUSPEND) -> tcb.eptr == Vnull)
+    0 <= tcb.OSTCBPrio && tcb.OSTCBPrio < 64 &&
+    tcb.OSTCBPrio & 7 == tcb.OSTCBX &&
+    tcb.OSTCBPrio >> 3 == tcb.OSTCBY &&
+    1 << tcb.OSTCBX == tcb.OSTCBBitX &&
+    1 << tcb.OSTCBY == tcb.OSTCBBitY &&
+    (tcb.OSTCBStat == OS_STAT_RDY ||
+     tcb.OSTCBStat == OS_STAT_SUSPEND ||
+     tcb.OSTCBStat == OS_STAT_SEM ||
+     tcb.OSTCBStat == OS_STAT_Q ||
+     tcb.OSTCBStat == OS_STAT_MBOX ||
+     tcb.OSTCBStat == OS_STAT_MUTEX ||
+     tcb.OSTCBStat == OS_STAT_SEM | OS_STAT_SUSPEND ||
+     tcb.OSTCBStat == OS_STAT_Q | OS_STAT_SUSPEND ||
+     tcb.OSTCBStat == OS_STAT_MBOX | OS_STAT_SUSPEND ||
+     tcb.OSTCBStat == OS_STAT_MUTEX | OS_STAT_SUSPEND) &&
+    ((tcb.OSTCBStat == OS_STAT_RDY || tcb.OSTCBStat == OS_STAT_SUSPEND) ->
+     tcb.OSTCBEventPtr == Vnull)
 }
 
-predicate prio_in_tbl(int32u prio, int32u[] rtbl) {
+// Whether a priority exists in OSRdyTbl
+predicate prio_in_tbl(int8u prio, Seq<int8u> rtbl) {
     let x = prio & 7 in
-        rtbl[prio >> 3] & (1 << x) == 1 << x
+        rtbl[int(prio >> 3)] & (1 << x) == 1 << x
     end
 }
 
-predicate prio_not_in_tbl(int32u prio, int32u[] rtbl) {
+predicate prio_not_in_tbl(int8u prio, Seq<int8u> rtbl) {
     let x = prio & 7 in
-        rtbl[prio >> 3] & (1 << x) == 0
+        rtbl[int(prio >> 3)] & (1 << x) == 0
     end
 }
 
-// We now write down the refinement relations between high- and
-// low-level task information.
+/**
+ * Refinement relation between low-level and high-level task information
+ */
 
-// Refinement relation: rdy case
-
-predicate RLH_RdyI_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
-    prio_in_tbl(tcb.prio, rtbl) ->
-    tcb.stat == OS_STAT_RDY && tcb.dly == 0 &&
-    abstcb.prio == tcb.prio && abstcb.stat == rdy && abstcb.sus == false
+// ready case
+predicate RLH_RdyI_P(TCB tcb, Seq<int8u> rtbl, AbsTCB abstcb) {
+    prio_in_tbl(tcb.OSTCBPrio, rtbl) ->
+    tcb.OSTCBStat == OS_STAT_RDY && tcb.OSTCBDly == 0 &&
+    abstcb.prio == tcb.OSTCBPrio && abstcb.stat == rdy && abstcb.sus == false
 }
 
-predicate RHL_RdyI_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
+predicate RHL_RdyI_P(TCB tcb, Seq<int8u> rtbl, AbsTCB abstcb) {
     abstcb.stat == rdy && abstcb.sus == false ->
-    prio_in_tbl(tcb.prio, rtbl) && tcb.prio == abstcb.prio &&
-    tcb.stat == OS_STAT_RDY && tcb.dly == 0
+    prio_in_tbl(tcb.OSTCBPrio, rtbl) && tcb.OSTCBPrio == abstcb.prio &&
+    tcb.OSTCBStat == OS_STAT_RDY && tcb.OSTCBDly == 0
 }
 
-// Refinement relation: wait case
-
-predicate RLH_Wait_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
-    prio_not_in_tbl(tcb.prio, rtbl) -> tcb.stat == OS_STAT_RDY ->
-    tcb.dly > 0 && abstcb.prio == tcb.prio &&
-    abstcb.stat == wait(os_stat_time, tcb.dly) && abstcb.sus == false
+// wait case
+predicate RLH_Wait_P(TCB tcb, Seq<int8u> rtbl, AbsTCB abstcb) {
+    prio_not_in_tbl(tcb.OSTCBPrio, rtbl) -> tcb.OSTCBStat == OS_STAT_RDY ->
+    tcb.OSTCBDly > 0 && abstcb.prio == tcb.OSTCBPrio &&
+    abstcb.stat == wait(os_stat_time, tcb.OSTCBDly) && abstcb.sus == false
 }
 
-predicate RHL_Wait_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
+predicate RHL_Wait_P(TCB tcb, Seq<int8u> rtbl, AbsTCB abstcb) {
     switch (abstcb) {
         case AbsTCB{{prio: prio, stat: wait(os_stat_time, d), sus: false}}:
-            prio == tcb.prio && prio_not_in_tbl(prio, rtbl) &&
-            d == tcb.dly && d > 0 && tcb.stat == OS_STAT_RDY;
+            prio == tcb.OSTCBPrio && prio_not_in_tbl(prio, rtbl) &&
+            d == tcb.OSTCBDly && d > 0 && tcb.OSTCBStat == OS_STAT_RDY;
         default: true;
     }
 }
 
-// Refinement relation: suspend case
-
-predicate RLH_Suspend_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
+// suspend case
+predicate RLH_Suspend_P(TCB tcb, Seq<int8u> rtbl, AbsTCB abstcb) {
     (
-        prio_not_in_tbl(tcb.prio, rtbl) -> tcb.dly == 0 -> tcb.stat == OS_STAT_SUSPEND ->
-        abstcb.prio == tcb.prio && abstcb.stat == rdy && abstcb.sus == true
+        prio_not_in_tbl(tcb.OSTCBPrio, rtbl) -> tcb.OSTCBDly == 0 ->
+        tcb.OSTCBStat == OS_STAT_SUSPEND ->
+        abstcb.prio == tcb.OSTCBPrio && abstcb.stat == rdy && abstcb.sus == true
     )
     &&
     (
-        prio_not_in_tbl(tcb.prio, rtbl) -> tcb.stat == OS_STAT_SUSPEND -> tcb.dly > 0 ->
-        abstcb.prio == tcb.prio && abstcb.stat == wait(os_stat_time, tcb.dly) && abstcb.sus == true
+        prio_not_in_tbl(tcb.OSTCBPrio, rtbl) -> tcb.OSTCBDly > 0 ->
+        tcb.OSTCBStat == OS_STAT_SUSPEND ->
+        abstcb.prio == tcb.OSTCBPrio && abstcb.stat == wait(os_stat_time, tcb.OSTCBDly) &&
+        abstcb.sus == true
     )
 }
 
-predicate RHL_Suspend_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
+predicate RHL_Suspend_P(TCB tcb, Seq<int8u> rtbl, AbsTCB abstcb) {
     (
         abstcb.stat == rdy -> abstcb.sus == true ->
-        prio_not_in_tbl(tcb.prio, rtbl) && tcb.prio == abstcb.prio && tcb.dly == 0 && tcb.stat == OS_STAT_SUSPEND
+        prio_not_in_tbl(tcb.OSTCBPrio, rtbl) && tcb.OSTCBPrio == abstcb.prio &&
+        tcb.OSTCBDly == 0 && tcb.OSTCBStat == OS_STAT_SUSPEND
     )
     &&
     (
         switch (abstcb) {
             case AbsTCB{{prio: prio, stat: wait(os_stat_time, d), sus: true}}:
-                prio == tcb.prio && prio_not_in_tbl(prio, rtbl) &&
-                d == tcb.dly && d > 0 && tcb.stat == OS_STAT_SUSPEND;
+                prio == tcb.OSTCBPrio && prio_not_in_tbl(prio, rtbl) &&
+                d == tcb.OSTCBDly && d > 0 && tcb.OSTCBStat == OS_STAT_SUSPEND;
             default: true;
         }
     )
 }
 
-// Refinement relation: wait for semaphore
-
-predicate RLH_WaitS_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
-    prio_not_in_tbl(tcb.prio, rtbl) -> tcb.stat == OS_STAT_SEM ->
-    switch (tcb.eptr) {
+// semaphore case
+predicate RLH_WaitS_P(TCB tcb, Seq<int8u> rtbl, AbsTCB abstcb) {
+    prio_not_in_tbl(tcb.OSTCBPrio, rtbl) -> tcb.OSTCBStat == OS_STAT_SEM ->
+    switch (tcb.OSTCBEventPtr) {
         case Vptr(eid):
-            abstcb.prio == tcb.prio && abstcb.stat == wait(os_stat_sem(eid), tcb.dly) &&
+            abstcb.prio == tcb.OSTCBPrio &&
+            abstcb.stat == wait(os_stat_sem(eid), tcb.OSTCBDly) &&
             abstcb.sus == false;
         default: true;
     }
 }
 
-predicate RHL_WaitS_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
+predicate RHL_WaitS_P(TCB tcb, Seq<int8u> rtbl, AbsTCB abstcb) {
     switch (abstcb) {
         case AbsTCB{{prio: prio, stat: wait(os_stat_sem(eid), dly), sus: false}}:
-            tcb.prio == prio && prio_not_in_tbl(prio, rtbl) &&
-            tcb.eptr == Vptr(eid) && tcb.stat == OS_STAT_SEM;
+            tcb.OSTCBPrio == prio && prio_not_in_tbl(prio, rtbl) &&
+            tcb.OSTCBEventPtr == Vptr(eid) && tcb.OSTCBStat == OS_STAT_SEM;
         default: true;
     }
 }
 
-// Refinement relation: wait for semaphore and suspend
-
-predicate RLH_WaitS_Suspend_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
-    prio_not_in_tbl(tcb.prio, rtbl) -> tcb.stat == OS_STAT_SEM | OS_STAT_SUSPEND ->
-    switch (tcb.eptr) {
+predicate RLH_WaitS_Suspend_P(TCB tcb, Seq<int8u> rtbl, AbsTCB abstcb) {
+    prio_not_in_tbl(tcb.OSTCBPrio, rtbl) -> tcb.OSTCBStat == OS_STAT_SEM | OS_STAT_SUSPEND ->
+    switch (tcb.OSTCBEventPtr) {
         case Vptr(eid):
-            abstcb.prio == tcb.prio && abstcb.stat == wait(os_stat_sem(eid), tcb.dly) &&
+            abstcb.prio == tcb.OSTCBPrio &&
+            abstcb.stat == wait(os_stat_sem(eid), tcb.OSTCBDly) &&
             abstcb.sus == true;
         default: true;
     }
 }
 
-predicate RHL_WaitS_Suspend_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
+predicate RHL_WaitS_Suspend_P(TCB tcb, Seq<int8u> rtbl, AbsTCB abstcb) {
     switch (abstcb) {
         case AbsTCB{{prio: prio, stat: wait(os_stat_sem(eid), dly), sus: true}}:
-            tcb.prio == prio && prio_not_in_tbl(prio, rtbl) &&
-            tcb.eptr == Vptr(eid) && tcb.stat == OS_STAT_SEM | OS_STAT_SUSPEND;
+            tcb.OSTCBPrio == prio && prio_not_in_tbl(prio, rtbl) &&
+            tcb.OSTCBEventPtr == Vptr(eid) && tcb.OSTCBStat == OS_STAT_SEM | OS_STAT_SUSPEND;
         default: true;
     }
 }
 
-// Refinement relation: wait for queue
-
-predicate RLH_WaitQ_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
-    prio_not_in_tbl(tcb.prio, rtbl) -> tcb.stat == OS_STAT_Q ->
-    switch (tcb.eptr) {
+// queue case
+predicate RLH_WaitQ_P(TCB tcb, Seq<int8u> rtbl, AbsTCB abstcb) {
+    prio_not_in_tbl(tcb.OSTCBPrio, rtbl) -> tcb.OSTCBStat == OS_STAT_Q ->
+    switch (tcb.OSTCBEventPtr) {
         case Vptr(eid):
-            abstcb.prio == tcb.prio && abstcb.stat == wait(os_stat_q(eid), tcb.dly) &&
+            abstcb.prio == tcb.OSTCBPrio &&
+            abstcb.stat == wait(os_stat_q(eid), tcb.OSTCBDly) &&
             abstcb.sus == false;
         default: true;
     }
 }
 
-predicate RHL_WaitQ_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
+predicate RHL_WaitQ_P(TCB tcb, Seq<int8u> rtbl, AbsTCB abstcb) {
     switch (abstcb) {
         case AbsTCB{{prio: prio, stat: wait(os_stat_q(eid), dly), sus: false}}:
-            tcb.prio == prio && prio_not_in_tbl(prio, rtbl) && 
-            tcb.eptr == Vptr(eid) && tcb.stat == OS_STAT_Q;
+            tcb.OSTCBPrio == prio && prio_not_in_tbl(prio, rtbl) && 
+            tcb.OSTCBEventPtr == Vptr(eid) && tcb.OSTCBStat == OS_STAT_Q;
         default: true;
     }
 }
 
-// Refinement relation: wait for queue and suspend
-
-predicate RLH_WaitQ_Suspend_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
-    prio_not_in_tbl(tcb.prio, rtbl) -> tcb.stat == OS_STAT_Q | OS_STAT_SUSPEND ->
-    switch (tcb.eptr) {
+predicate RLH_WaitQ_Suspend_P(TCB tcb, Seq<int8u> rtbl, AbsTCB abstcb) {
+    prio_not_in_tbl(tcb.OSTCBPrio, rtbl) -> tcb.OSTCBStat == OS_STAT_Q | OS_STAT_SUSPEND ->
+    switch (tcb.OSTCBEventPtr) {
         case Vptr(eid):
-            abstcb.prio == tcb.prio && abstcb.stat == wait(os_stat_q(eid), tcb.dly) &&
+            abstcb.prio == tcb.OSTCBPrio &&
+            abstcb.stat == wait(os_stat_q(eid), tcb.OSTCBDly) &&
             abstcb.sus == true;
         default: true;
     }
 }
 
-predicate RHL_WaitQ_Suspend_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
+predicate RHL_WaitQ_Suspend_P(TCB tcb, Seq<int8u> rtbl, AbsTCB abstcb) {
     switch (abstcb) {
         case AbsTCB{{prio: prio, stat: wait(os_stat_q(eid), dly), sus: true}}:
-            tcb.prio == prio && prio_not_in_tbl(prio, rtbl) &&
-            tcb.eptr == Vptr(eid) && tcb.stat == OS_STAT_Q | OS_STAT_SUSPEND;
+            tcb.OSTCBPrio == prio && prio_not_in_tbl(prio, rtbl) &&
+            tcb.OSTCBEventPtr == Vptr(eid) && tcb.OSTCBStat == OS_STAT_Q | OS_STAT_SUSPEND;
         default: true;
     }
 }
 
-// Refinement relation: wait for mailbox
-
-predicate RLH_WaitMB_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
-    prio_not_in_tbl(tcb.prio, rtbl) -> tcb.stat == OS_STAT_MBOX ->
-    switch (tcb.eptr) {
+// mailbox case
+predicate RLH_WaitMB_P(TCB tcb, Seq<int8u> rtbl, AbsTCB abstcb) {
+    prio_not_in_tbl(tcb.OSTCBPrio, rtbl) -> tcb.OSTCBStat == OS_STAT_MBOX ->
+    switch (tcb.OSTCBEventPtr) {
         case Vptr(eid):
-            abstcb.prio == tcb.prio && abstcb.stat == wait(os_stat_mbox(eid), tcb.dly) &&
+            abstcb.prio == tcb.OSTCBPrio &&
+            abstcb.stat == wait(os_stat_mbox(eid), tcb.OSTCBDly) &&
             abstcb.sus == false;
         default: true;
     }
 }
 
-predicate RHL_WaitMB_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
+predicate RHL_WaitMB_P(TCB tcb, Seq<int8u> rtbl, AbsTCB abstcb) {
     switch (abstcb) {
         case AbsTCB{{prio: prio, stat: wait(os_stat_mbox(eid), dly), sus: false}}:
-            tcb.prio == prio && prio_not_in_tbl(prio, rtbl) &&
-            tcb.eptr == Vptr(eid) && tcb.stat == OS_STAT_MBOX;
+            tcb.OSTCBPrio == prio && prio_not_in_tbl(prio, rtbl) &&
+            tcb.OSTCBEventPtr == Vptr(eid) && tcb.OSTCBStat == OS_STAT_MBOX;
         default: true;
     }
 }
 
-// Refinement relation: wait for mailbox and suspend
-
-predicate RLH_WaitMB_Suspend_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
-    prio_not_in_tbl(tcb.prio, rtbl) -> tcb.stat == OS_STAT_MBOX | OS_STAT_SUSPEND ->
-    switch (tcb.eptr) {
+predicate RLH_WaitMB_Suspend_P(TCB tcb, Seq<int8u> rtbl, AbsTCB abstcb) {
+    prio_not_in_tbl(tcb.OSTCBPrio, rtbl) -> tcb.OSTCBStat == OS_STAT_MBOX | OS_STAT_SUSPEND ->
+    switch (tcb.OSTCBEventPtr) {
         case Vptr(eid):
-            abstcb.prio == tcb.prio && abstcb.stat == wait(os_stat_mbox(eid), tcb.dly) &&
+            abstcb.prio == tcb.OSTCBPrio &&
+            abstcb.stat == wait(os_stat_mbox(eid), tcb.OSTCBDly) &&
             abstcb.sus == true;
         default: true;
     }
 }
 
-predicate RHL_WaitMB_Suspend_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
+predicate RHL_WaitMB_Suspend_P(TCB tcb, Seq<int8u> rtbl, AbsTCB abstcb) {
     switch (abstcb) {
         case AbsTCB{{prio: prio, stat: wait(os_stat_mbox(eid), dly), sus: true}}:
-            tcb.prio == prio && prio_not_in_tbl(prio, rtbl) &&
-            tcb.eptr == Vptr(eid) && tcb.stat == OS_STAT_MBOX | OS_STAT_SUSPEND;
+            tcb.OSTCBPrio == prio && prio_not_in_tbl(prio, rtbl) &&
+            tcb.OSTCBEventPtr == Vptr(eid) && tcb.OSTCBStat == OS_STAT_MBOX | OS_STAT_SUSPEND;
         default: true;
     }
 }
 
-// Refinement relation: wait for mutex
-
-predicate RLH_WaitMS_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
-    prio_not_in_tbl(tcb.prio, rtbl) -> tcb.stat == OS_STAT_MUTEX ->
-    switch (tcb.eptr) {
+// mutex case
+predicate RLH_WaitMS_P(TCB tcb, Seq<int8u> rtbl, AbsTCB abstcb) {
+    prio_not_in_tbl(tcb.OSTCBPrio, rtbl) -> tcb.OSTCBStat == OS_STAT_MUTEX ->
+    switch (tcb.OSTCBEventPtr) {
         case Vptr(eid):
-            abstcb.prio == tcb.prio && abstcb.stat == wait(os_stat_mutexsem(eid), tcb.dly) &&
+            abstcb.prio == tcb.OSTCBPrio &&
+            abstcb.stat == wait(os_stat_mutexsem(eid), tcb.OSTCBDly) &&
             abstcb.sus == false;
         default: true;
     }
 }
 
-predicate RHL_WaitMS_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
+predicate RHL_WaitMS_P(TCB tcb, Seq<int8u> rtbl, AbsTCB abstcb) {
     switch (abstcb) {
         case AbsTCB{{prio: prio, stat: wait(os_stat_mutexsem(eid), dly), sus: false}}:
-            tcb.prio == prio && prio_not_in_tbl(prio, rtbl) &&
-            tcb.eptr == Vptr(eid) && tcb.stat == OS_STAT_MUTEX;
+            tcb.OSTCBPrio == prio && prio_not_in_tbl(prio, rtbl) &&
+            tcb.OSTCBEventPtr == Vptr(eid) && tcb.OSTCBStat == OS_STAT_MUTEX;
         default: true;
     }
 }
 
-// Refinement relation: wait for mutex and suspend
-
-predicate RLH_WaitMS_Suspend_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
-    prio_not_in_tbl(tcb.prio, rtbl) -> tcb.stat == OS_STAT_MUTEX | OS_STAT_SUSPEND ->
-    switch (tcb.eptr) {
+predicate RLH_WaitMS_Suspend_P(TCB tcb, Seq<int8u> rtbl, AbsTCB abstcb) {
+    prio_not_in_tbl(tcb.OSTCBPrio, rtbl) -> tcb.OSTCBStat == OS_STAT_MUTEX | OS_STAT_SUSPEND ->
+    switch (tcb.OSTCBEventPtr) {
         case Vptr(eid):
-            abstcb.prio == tcb.prio && abstcb.stat == wait(os_stat_mutexsem(eid), tcb.dly) &&
+            abstcb.prio == tcb.OSTCBPrio &&
+            abstcb.stat == wait(os_stat_mutexsem(eid), tcb.OSTCBDly) &&
             abstcb.sus == true;
         default: true;
     }
 }
 
-predicate RHL_WaitMS_Suspend_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
+predicate RHL_WaitMS_Suspend_P(TCB tcb, Seq<int8u> rtbl, AbsTCB abstcb) {
     switch (abstcb) {
         case AbsTCB{{prio: prio, stat: wait(os_stat_mutexsem(eid), dly), sus: true}}:
-            tcb.prio == prio && prio_not_in_tbl(prio, rtbl) &&
-            tcb.eptr == Vptr(eid) && tcb.stat == OS_STAT_MUTEX | OS_STAT_SUSPEND;
+            tcb.OSTCBPrio == prio && prio_not_in_tbl(prio, rtbl) &&
+            tcb.OSTCBEventPtr == Vptr(eid) && tcb.OSTCBStat == OS_STAT_MUTEX | OS_STAT_SUSPEND;
         default: true;
     }
 }
 
-// Collection of all low-to-high relations: wait for event
-
-predicate RLH_TCB_Status_Wait_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
+// all low-to-high: wait for event
+predicate RLH_TCB_Status_Wait_P(TCB tcb, Seq<int8u> rtbl, AbsTCB abstcb) {
     RLH_Wait_P(tcb, rtbl, abstcb) &&
     RLH_WaitS_P(tcb, rtbl, abstcb) &&
     RLH_WaitQ_P(tcb, rtbl, abstcb) &&
@@ -275,9 +442,8 @@ predicate RLH_TCB_Status_Wait_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
     RLH_WaitMS_Suspend_P(tcb, rtbl, abstcb)
 }
 
-// Collection of all high-to-low relations: wait for event
-
-predicate RHL_TCB_Status_Wait_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
+// all high-to-low: wait for event
+predicate RHL_TCB_Status_Wait_P(TCB tcb, Seq<int8u> rtbl, AbsTCB abstcb) {
     RHL_Wait_P(tcb, rtbl, abstcb) &&
     RHL_WaitS_P(tcb, rtbl, abstcb) &&
     RHL_WaitQ_P(tcb, rtbl, abstcb) &&
@@ -289,9 +455,8 @@ predicate RHL_TCB_Status_Wait_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
     RHL_WaitMS_Suspend_P(tcb, rtbl, abstcb)
 }
 
-// All refinement relations for task information
-
-predicate R_TCB_Status_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
+// all refinement relations
+predicate R_TCB_Status_P(TCB tcb, Seq<int8u> rtbl, AbsTCB abstcb) {
     RLH_RdyI_P(tcb, rtbl, abstcb) &&
     RHL_RdyI_P(tcb, rtbl, abstcb) &&
     RLH_Suspend_P(tcb, rtbl, abstcb) &&
@@ -301,1354 +466,1769 @@ predicate R_TCB_Status_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
 }
 
 /*
- * We now write down the refinement relations between high- and
- * low-level event information.
+ * Invariant relating the priority map and the priority groups.
+ *
+ * For each index n between 0 and 7, the corresponding bit in grp is on
+ * if and only if the corresponding index in rtbl is nonzero.
  */
+predicate RL_Tbl_Grp_P(Global global) {
+    |global.OSRdyTbl| == 8 &&
+    forall (int8u n in range8(0, 8)) {
+        (global.OSRdyGrp & (1 << n) == 0) ==
+            (global.OSRdyTbl[int(n)] == 0) &&
+        (global.OSRdyGrp & (1 << n) == 1 << n) ==
+            (global.OSRdyTbl[int(n)] > 0)
+    }
+}
 
 /*
- * Same as prio_in_tbl?
+ * Unset priority in tcb from the priority map.
  */
-predicate PrioWaitInQ(int32u prio, int32u[] etbl) {
-    let x = prio & 7 in 
-        let y = prio >> 3 in 
-            etbl[y] & (1 << x) == 1 << x
-        end
+function unset_bitmap_prio(Global global, TCB tcb) -> Global {
+    let y = int(tcb.OSTCBY) in
+    let bitx = tcb.OSTCBBitX in
+    let global2 = global{|OSRdyTbl[y] := global.OSRdyTbl[y] & ~bitx|} in
+        if (global2.OSRdyTbl[y] == 0) {
+            global2{OSRdyGrp := global2.OSRdyGrp & ~tcb.OSTCBBitY}
+        } else {
+            global2
+        }
+    end
+    end
     end
 }
 
 /*
- * Low-to-high relation, queue case.
- *
- * For each event control block of queue type, for each priority in
- * the priority table of the event, the priority exists in tcbls, and
- * the corresponding task has status of waiting for the same event.
+ * Set priority in tcb onto the priority map.
  */
-predicate RLH_ECB_ETbl_Q_P(addrval eid, EventCtr ecb, TCBMap tcbls) {
-    forall (int32u prio in range(0, 64)) {
-        PrioWaitInQ(prio, ecb.etbl) ->
-        ecb.OSEventType == OS_EVENT_TYPE_Q ->
-        exists (addrval tid in tcbls) {
-            get(tid, tcbls).prio == prio &&
-            switch (get(tid, tcbls).stat) {
-                case wait(os_stat_q(eid2), _):
-                    eid2 == eid;
-                default: false;
-            }
+function set_bitmap_prio(Global global, TCB tcb) -> Global {
+    let y = int(tcb.OSTCBY) in
+    let bitx = tcb.OSTCBBitX in
+    let global2 = global{OSRdyGrp := global.OSRdyGrp | tcb.OSTCBBitY} in
+        global2{|OSRdyTbl[y] := global.OSRdyTbl[y] | bitx|}
+    end
+    end
+    end
+}
+
+/*
+ * Function unset_bitmap_prio preserves RL_Tbl_Grp_P.
+ */
+query unset_bitmap_prio_RL_Tbl_Grp_P {
+    fixes tcb : TCB;
+    fixes global : Global;
+    fixes global2 : Global;
+    assumes global2 == unset_bitmap_prio(global, tcb);
+    assumes RL_TCBblk_P(tcb);
+    assumes H: RL_Tbl_Grp_P(global);
+    shows RL_Tbl_Grp_P(global2)
+    proof { seq_auto }
+}
+
+/*
+ * Function unset_bitmap_prio unset priority.
+ */
+query unset_bitmap_prio_RL_Tbl_Grp_P2 {
+    fixes tcb : TCB;
+    fixes global : Global;
+    fixes global2 : Global;
+    assumes global2 == unset_bitmap_prio(global, tcb);
+    assumes RL_TCBblk_P(tcb);
+    shows prio_not_in_tbl(tcb.OSTCBPrio, global2.OSRdyTbl)
+    proof { seq_auto }
+}
+
+/*
+ * Function set_bitmap_prio preserves RL_Tbl_Grp_P.
+ */
+query set_bitmap_prio_RL_Tbl_Grp_P {
+    fixes tcb : TCB;
+    fixes global : Global;
+    fixes global2 : Global;
+    assumes global2 == set_bitmap_prio(global, tcb);
+    assumes RL_TCBblk_P(tcb);
+    assumes RL_Tbl_Grp_P(global);
+    shows RL_Tbl_Grp_P(global2)
+    proof { seq_auto }
+}
+
+/*
+ * Function set_bitmap_prio set priority.
+ */
+query set_bitmap_prio_RL_Tbl_Grp_P2 {
+    fixes tcb : TCB;
+    fixes global : Global;
+    fixes global2 : Global;
+    assumes global2 == set_bitmap_prio(global, tcb);
+    assumes RL_TCBblk_P(tcb);
+    shows prio_in_tbl(tcb.OSTCBPrio, global2.OSRdyTbl)
+    proof { seq_auto }
+}
+
+/*
+ * Low-level invariant on OSTCBPrioTbl and priority table.
+ *
+ * 1. Priority is in the priority table iff it is in OSTCBPrioTbl.
+ * 2. Each entry in OSTCBPrioTbl has right priority and obeys its invariant.
+ */
+predicate RL_TCB_P(Global global) {
+    forall (int8u prio in range8(0, 64)) {
+        if (!indom(prio, global.OSTCBPrioTbl)) {
+            prio_not_in_tbl(prio, global.OSRdyTbl)
+        } else {
+            let tcb = get(prio, global.OSTCBPrioTbl) in
+                tcb.OSTCBPrio == prio &&
+                RL_TCBblk_P(tcb)
+            end
         }
     }
 }
 
 /*
- * High-to-low relation, queue case.
+ * Refinement relation between OSTCBPrioTbl and tcbMap.
  *
- * For each task in tcbls, if the task is waiting for queue with the
- * given eid, then the task exists in the priority table of the event,
- * and the event type is queue.
+ * 1. They contain entries at the same priorities.
+ * 2. The corresponding elements satisfy refinement relation R_TCB_Status_P.
  */
-predicate RHL_ECB_ETbl_Q_P(addrval eid, EventCtr ecb, TCBMap tcbls) {
-    forall (addrval tid in tcbls) {
-        switch (get(tid, tcbls)) {
-            case AbsTCB{{prio: prio, stat: wait(os_stat_q(eid2), _)}}:
-                eid2 == eid ->
-                0 <= prio && prio < 64 &&
-                PrioWaitInQ(prio, ecb.etbl) &&
-                ecb.OSEventType == OS_EVENT_TYPE_Q;
-            default: true;
+predicate RLH_TCB_P(Global global, AbsGlobal absGlobal) {
+    forall (int8u prio in range8(0, 64)) {
+        if (!indom(prio, global.OSTCBPrioTbl)) {
+            !indom(prio, absGlobal.tcbMap)
+        } else {
+            indom(prio, absGlobal.tcbMap) &&
+            let tcb = get(prio, global.OSTCBPrioTbl) in
+            let abstcb = get(prio, absGlobal.tcbMap) in
+                R_TCB_Status_P(tcb, global.OSRdyTbl, abstcb)
+            end
+            end
         }
     }
 }
-
-/*
- * Low-to-high relation, semaphore case.
- *
- * For each event control block of semaphore type, for each priority in
- * the priority table of the event, the priority exists in tcbls, and
- * the corresponding task has the status of waiting for the same event.
- */
-predicate RLH_ECB_ETbl_SEM_P(addrval eid, EventCtr ecb, TCBMap tcbls) {
-    forall (int32u prio in range(0, 64)) {
-        PrioWaitInQ(prio, ecb.etbl) -> 
-        ecb.OSEventType == OS_EVENT_TYPE_SEM ->
-        exists (addrval tid in tcbls) {
-            get(tid, tcbls).prio == prio &&
-            switch (get(tid, tcbls).stat) {
-                case wait(os_stat_sem(eid2), _):
-                    eid2 == eid;
-                default: false;
-            }
-        }
-    }
-}
-
-/*
- * High-to-low relation, semaphore case.
- *
- * For each task in tcbls, if the task is waiting for semaphore wit the
- * given eid, then the task exists in the priority table of the event,
- * and the event type is semaphore.
- */
-predicate RHL_ECB_ETbl_SEM_P(addrval eid, EventCtr ecb, TCBMap tcbls) {
-    forall (addrval tid in tcbls) {
-        switch (get(tid, tcbls)) {
-            case AbsTCB{{prio: prio, stat: wait(os_stat_sem(eid2), _)}}:
-                eid2 == eid ->
-                0 <= prio && prio < 64 &&
-                PrioWaitInQ(prio, ecb.etbl) &&
-                ecb.OSEventType == OS_EVENT_TYPE_SEM;
-            default: true;
-        }
-    }
-}
-
-/*
- * Low-to-high relation, mailbox case.
- *
- * For each event control block of mailbox type, for each priority in
- * the priority queue of the event, the priority exists in tcbls, and
- * the corresponding task has the status of waiting for the same event.
- */
-predicate RLH_ECB_ETbl_MBOX_P(addrval eid, EventCtr ecb, TCBMap tcbls) {
-    forall (int32u prio in range(0, 64)) {
-        PrioWaitInQ(prio, ecb.etbl) -> 
-        ecb.OSEventType == OS_EVENT_TYPE_MBOX ->
-        exists (addrval tid in tcbls) {
-            get(tid, tcbls).prio == prio &&
-            switch (get(tid, tcbls).stat) {
-                case wait(os_stat_mbox(eid2), _):
-                    eid2 == eid;
-                default: false;
-            }
-        }
-    }
-}
-
-/*
- * High-to-low relation, mailbox case.
- *
- * For each task in tcbls, if the task is waiting for mailbox with the
- * given eid, then the task exists in the priority table of the event,
- * and the event type is mailbox.
- */
-predicate RHL_ECB_ETbl_MBOX_P(addrval eid, EventCtr ecb, TCBMap tcbls) {
-    forall (addrval tid in tcbls) {
-        switch (get(tid, tcbls)) {
-            case AbsTCB{{prio: prio, stat: wait(os_stat_mbox(eid2), _)}}:
-                eid2 == eid ->
-                0 <= prio && prio < 64 &&
-                PrioWaitInQ(prio, ecb.etbl) &&
-                ecb.OSEventType == OS_EVENT_TYPE_MBOX;
-            default: true;
-        }
-    }
-}
-
-/*
- * Low-to-high relation, mutex case.
- *
- * For each event control block of mutex type, for each priority in
- * the priority table of the event, the priority exists in tcbls, and
- * the corresponding task has the status of waiting for the same event.
- */
-predicate RLH_ECB_ETbl_MUTEX_P(addrval eid, EventCtr ecb, TCBMap tcbls) {
-    forall (int32u prio in range(0, 64)) {
-        PrioWaitInQ(prio, ecb.etbl) -> 
-        ecb.OSEventType == OS_EVENT_TYPE_MUTEX ->
-        exists (addrval tid in tcbls) {
-            get(tid, tcbls).prio == prio &&
-            switch (get(tid, tcbls).stat) {
-                case wait(os_stat_mutexsem(eid2), _):
-                    eid2 == eid;
-                default: false;
-            }
-        }
-    }
-}
-
-/*
- * High-to-low relation, mutex case.
- *
- * For each task in tcbls, if the task is waiting for mutex with the
- * given eid, then the task exists in the priority table of the event,
- * and the event type is mutex.
- */
-predicate RHL_ECB_ETbl_MUTEX_P(addrval eid, EventCtr ecb, TCBMap tcbls) {
-    forall (addrval tid in tcbls) {
-        switch (get(tid, tcbls)) {
-            case AbsTCB{{prio: prio, stat: wait(os_stat_mutexsem(eid2), _)}}:
-                eid2 == eid ->
-                0 <= prio && prio < 64 &&
-                PrioWaitInQ(prio, ecb.etbl) &&
-                ecb.OSEventType == OS_EVENT_TYPE_MUTEX;
-            default: true;
-        }
-    }
-}
-
-/*
- * Low-to-high relations: event control block vs. tcbls.
- */
-predicate RLH_ECB_ETbl_P(addrval eid, EventCtr ecb, TCBMap tcbls) {
-    RLH_ECB_ETbl_Q_P(eid, ecb, tcbls) &&
-    RLH_ECB_ETbl_SEM_P(eid, ecb, tcbls) &&
-    RLH_ECB_ETbl_MBOX_P(eid, ecb, tcbls) &&
-    RLH_ECB_ETbl_MUTEX_P(eid, ecb, tcbls) 
-}
-
-/*
- * High-to-low relations: event control block vs. tcbls.
- */
-predicate RHL_ECB_ETbl_P(addrval eid, EventCtr ecb, TCBMap tcbls) {
-    RHL_ECB_ETbl_Q_P(eid, ecb, tcbls) &&
-    RHL_ECB_ETbl_SEM_P(eid, ecb, tcbls) &&
-    RHL_ECB_ETbl_MBOX_P(eid, ecb, tcbls) &&
-    RHL_ECB_ETbl_MUTEX_P(eid, ecb, tcbls) 
-}
-
-/*
- * Invariant for OSEvent.
- *
- * - OSEventType is one of four possible choices.
- */
-predicate Event_Type_P(EventCtr ecb) {
-    ecb.OSEventType == OS_EVENT_TYPE_Q ||
-    ecb.OSEventType == OS_EVENT_TYPE_SEM ||
-    ecb.OSEventType == OS_EVENT_TYPE_MBOX ||
-    ecb.OSEventType == OS_EVENT_TYPE_MUTEX
-}
-
-/*
- * All relations and invariants for event control block.
- */
-predicate R_ECB_ETbl_P(addrval eid, EventCtr ecb, TCBMap tcbls){
-    RLH_ECB_ETbl_P(eid, ecb, tcbls) &&
-    RHL_ECB_ETbl_P(eid, ecb, tcbls) &&
-    Event_Type_P(ecb)
-}
-
-/*
- * All refinement relations and invariants for abstract and concrete
- * task control blocks.
- */
-predicate TCBNode_P(TCB tcb, int32u[] rtbl, AbsTCB abstcb) {
-    tcb.msg == abstcb.msg &&
-    tcb.prio == abstcb.prio &&
-    RL_TCBblk_P(tcb) &&
-    R_TCB_Status_P(tcb, rtbl, abstcb)
-}
-
-/*
- * Refinement relations between data structures for all abstract and
- * concrete task control blocks.
- *
- * - tcbList is the linked list of concrete task control blocks, with v
- *   being the head pointer.
- * - tcbls is the map of abstract task control blocks. It is formed by
- *   adding tid/abstcb pairs one at a time in the definition of TCBList_P. 
- */
-predicate TCBList_P(val v, TCBList tcbList, int32u[] rtbl, TCBMap tcbls) {
-    switch (tcbList) {
-        case nil: isEmpty(tcbls);
-        case cons(tcb, tcbList2):
-            switch (v) {
-                case Vptr(tid):
-                    exists (AbsTCB abstcb, TCBMap tcbls2) {
-                        TCBNode_P(tcb, rtbl, abstcb) &&
-                        TCBList_P(tcb.next, tcbList2, rtbl, tcbls2) &&
-                        join(tid, abstcb, tcbls2, tcbls)
-                    };
-                default: false;
-            };
-    }
-}
-
-// Properties of PrioTbl, comes from os_inv.v and abs_op.v:
-
-/*
- * There are no duplicate priorities in tcbls.
- */
-predicate R_Prio_No_Dup(TCBMap tcbls) {
-    forall (addrval tid1 in tcbls) {
-        forall (addrval tid2 in tcbls) {
-            tid1 != tid2 ->
-            get(tid1, tcbls).prio != get(tid2, tcbls).prio
-        }
-    }
-}
-
-/*
- * Invariant relating tcbls and ptbl (array of pointers to TCB).
- *
- * 1. For each priority in range, if the value in ptbl is Vptr(tid)
- *    where tid is not vhold, then tid is in tcbls with the same priority.
- * 2. For each task in tcbls, the corresponding entry in ptbl has the
- *    right value that is not vhold.
- * 3. There are no duplicate priorities in tcbls.
- */
-predicate R_PrioTbl_P(val[] ptbl, TCBMap tcbls, addrval vhold) {
-    forall (int32u prio in range(0, 64)) {
-        switch (ptbl[prio]) {
-            case Vptr(tid):
-                tid != vhold ->
-                indom(tid, tcbls) && get(tid, tcbls).prio == prio;
-            default: true;
-        }
-    } &&
-    forall (addrval tid in tcbls) {
-        0 <= get(tid, tcbls).prio && get(tid, tcbls).prio < 64 &&
-        switch (ptbl[get(tid, tcbls).prio]) {
-            case Vptr(tid2):
-                tid == tid2 && tid != vhold;
-            default: false;
-        }
-    } &&
-    R_Prio_No_Dup(tcbls)
-}
-
-/*
- * Invariant relating rtbl and ptbl.
- *
- * For each priority that is in rtbl, the corresponding entry in ptbl
- * is in the form Vptr(tid), where tid is not vhold.
- */
-predicate RL_RTbl_PrioTbl_P(int32u[] rtbl, val[] ptbl, addrval vhold){
-    forall (int32u prio in range(0, 64)) {
-        prio_in_tbl(prio, rtbl) ->
-        switch (ptbl[prio]) {
-            case Vptr(tid):
-                tid != vhold;
-            default: false;
-        }
-    }
-}
-
-/*
- * This lemma appears in OSMutexPostPart30. It states if ptbl is vhold at some
- * priority, then that priority can be added into tcbls, without violating
- * no-duplicate condition.
- */
-query mutex_post_nodup {
-    fixes ptbl : val[];
-    fixes tcbls1 : TCBMap;
-    fixes tcbls2 : TCBMap;
-    fixes vhold : addrval;
-    fixes tid : addrval;
-    fixes block : int32u;
-    fixes abstcb : AbsTCB;
-    assumes R_PrioTbl_P(ptbl, tcbls1, vhold);
-    assumes ptbl[abstcb.prio] == Vptr(vhold);
-    assumes indom(tid, tcbls1);
-    assumes mapUpdate(tid, abstcb, tcbls1, tcbls2);
-    shows R_Prio_No_Dup(tcbls2)
-    proof { auto }
-}
-
-/*
- * No waiting events in tcbls is present in ecbls.
- */
-predicate ecb_no_exists_tcb(ECBMap ecbls, TCBMap tcbls) {
-    forall (addrval tid in tcbls) {
-        switch (get(tid, tcbls)) {
-            case AbsTCB{{stat: st}}:
-                switch (st) {
-                    case wait(os_stat_sem(eid), _):
-                        !indom(eid, ecbls);
-                    case wait(os_stat_q(eid), _):
-                        !indom(eid, ecbls);
-                    case wait(os_stat_mbox(eid), _):
-                        !indom(eid, ecbls);
-                    case wait(os_stat_mutexsem(eid), _):
-                        !indom(eid, ecbls);
-                    default: true;
-                };
-        }
-    }
-}
-
-// ucos_common.v
-
-predicate prio_neq_cur(TCBMap tcbls, addrval curtid, int32u curprio) {
-    forall (addrval tid in tcbls) {
-        tid != curtid -> 
-        get(tid, tcbls).prio != curprio
-    }
-}
-
-/*
- * Properties of the abstract ECB:
- *
- * For semaphores, if count is positive, then the list of waiting tasks
- * empty. The converse also holds.
- *
- * For message queues, if the message list is nonempty, then the list of
- * waiting tasks is empty. The converse also holds.
- *
- * For mailboxes, if the message is not null, then the list of waiting
- * tasks is empty. The converse also holds.
- *
- * For mutexes, if there is no owner, then the list of waiting tasks is
- * empty. Otherwise, the priority of the mutex is less than the original
- * priority of owner (note less means higher priority), and the original
- * priority of owner is less than 64. Furthermore, if the set of waiting
- * tasks is nonempty, then there must be an owner. Finally, the priority
- * of the mutex is always less than 64.
- *
- */
-predicate RH_ECB_P(AbsECB absecb) {
-    switch (absecb.edata) {
-        case abssem(count): 
-            (count > 0 -> absecb.wset == nil) &&
-            (absecb.wset != nil -> count == 0);
-        case absmsgq(msgl, qsize):
-            (msgl != nil -> absecb.wset == nil) &&
-            (absecb.wset != nil -> msgl == nil);
-        case absmbox(msg):
-            (msg != Vnull -> absecb.wset == nil) &&
-            (absecb.wset != nil -> msg == Vnull);
-        case absmutexsem(prio, owner):
-            switch (owner) {
-                case none: absecb.wset == nil;
-                case some(own): prio < own.oprio && own.oprio < 64;
-                default: false;
-            } &&
-            (absecb.wset != nil -> owner != none) &&
-            prio < 64;
-        default: false;
-    }
-}
-
-// Distance between two addresses
-function distance(addrval startpos, addrval endpos) -> nat {
-    nat((endpos.offset - startpos.offset) / 4)
-}
-
-// Value is pointer if it is of type Vnull or Vptr
-predicate isptr(val v) {
-    switch (v) {
-        case Vnull: true;
-        case Vptr(p): true;
-        default: false;
-    }
-}
-
-// List of values are all pointers
-predicate isptr_list(List<val> vl) {
-    switch (vl) {
-        case nil: true;
-        case cons(v, vl2): isptr(v) && isptr_list(vl2);
-        default: false;
-    }
-}
-
-/*
- * Matching between low-level and high-level message lists
- *
- * Here d1 and d2 are indices of qin and qout, respectively.
- * If d2 > d1, then the message list is the segment between d1 and d2.
- * If d2 < d1, then the message list is the segment from d1 to end, followed
- *             by the segment from beginning to d2.
- * If d2 == d1, then there are two cases:
- *   1. if the number of entries is zero, then the message list is nil.
- *   2. if the number of entries is full, then the message list is the segment
- *      from d1 to end, followed by the segment from beginning to d2.
- * Finally, the message list are all pointers.
- */
-predicate MatchLHMsgList(osqueue osq, List<val> msgtbl, List<val> msgl) {
-    let d1 = distance(osq.qstart, osq.qin) in
-    let d2 = distance(osq.qstart, osq.qout) in
-        (d2 > d1 -> segment(d1, d2, msgtbl) == msgl) &&
-        (d2 < d1 -> append(segment(d1, nat(osq.qsize), msgtbl),
-                            segment(0, d2, msgtbl)) == msgl) &&
-        (d2 == d1 ->
-            (osq.qentries == 0 && msgl == nil) ||
-            (osq.qentries == osq.qsize && append(segment(d1, nat(osq.qsize), msgtbl),
-                                                segment(0, d2, msgtbl)) == msgl))
-    end end
-    &&
-    isptr_list(msgl)
-}
-
-// Matching of message length
-predicate MatchLHMsgLength(osqueue osq, List<val> msgl) {
-    nat(osq.qentries) == length(msgl)
-}
-
-// Matching of message size
-predicate MatchLHMsgSize(osqueue osq, int32u qmaxlen) {
-    osq.qsize == qmaxlen
-}
-
-/*
- * Matching between low-level and high-level mutex information
- *
- * x is a 16-bit integer, whose higher 8 bit corresponds to prio (priority)
- * of mutex, and the lower 8 bit is either 255 (not owned) or original
- * priority of the owning task.
- *
- * y is either Vnull (not owned) or corresponds to the owning task.
- */
-predicate MatchMutexSem(val x, val y, int32u prio, Option<owner> owner) {
-    switch (x) {
-        case Vint32(v):
-            v <= 65535 &&
-            prio == v >> 8 &&
-            (v & 255 == 255 -> owner == none && y == Vnull) &&
-            (v & 255 != 255 ->
-                switch (y) {
-                    case Vptr(tid): owner == some(owner{{tid: tid, oprio: v & 255}});
-                    default: false;
-                });
-        default: false;
-    }
-}
-
-/*
- * Matching between low-level and high-level event data
- */
-predicate RLH_ECBData_P(leventdata lecb, AbsECB hecb) {
-    switch (lecb) {
-        case DMsgQ(a, osq, osqblk, msgtbl):
-            switch (hecb.edata) {
-                case absmsgq(msgl, qmaxlen):
-                    MatchLHMsgList(osq, msgtbl, msgl) &&
-                    MatchLHMsgLength(osq, msgl) &&
-                    MatchLHMsgSize(osq, qmaxlen) && RH_ECB_P(hecb);
-                default: false;
-            };
-        case DSem(n1):
-            switch (hecb.edata) {
-                case abssem(n2): n1 == n2 && RH_ECB_P(hecb);
-                default: false;
-            };
-        case DMbox(a):
-            switch (hecb.edata) {
-                case absmbox(b): a == b && RH_ECB_P(hecb);
-                default: false;
-            };
-        case DMutex(x, y):
-            switch (hecb.edata) {
-                case absmutexsem(pr, owner):
-                    MatchMutexSem(x, y, pr, owner) && RH_ECB_P(hecb);
-                default: false;
-            };
-        default: false;
-    }
-}
-
-// Definition of ECBList_P, of which ecbList corresopnding to l and edls corresopnding to ecbls in the Coq version
-predicate ECBList_P(val v, val tl, List<EventCtr> ecbList, List<leventdata> edls, ECBMap ecbls, TCBMap tcbls) {
-    switch(ecbList) {
-        case nil:
-            edls == nil && isEmpty(ecbls) && v == tl;
-        case cons(ecb, ecbList2):
-            switch(v) {
-                case Vptr(eid):
-                    R_ECB_ETbl_P(eid, ecb, tcbls) &&
-                    switch(edls){
-                        case nil: false;
-                        case cons(enode, edls2):
-                            exists (AbsECB absmq, ECBMap ecbls2) {
-                                RLH_ECBData_P(enode, absmq) &&
-                                ECBList_P(ecb.OSEventListPtr, tl, ecbList2, edls2, ecbls2, tcbls) &&
-                                join(eid, absmq, ecbls2, ecbls)
-                            };
-                        default: false;
-                    };
-                default: false;
-            };
-        default: false;
-    }
-}
-
-// Mbox_common.v
-// Setting mailbox value to null in both low and high-level data
-query RLH_ECBData_p_high_mbox_acpt_hold {
-    fixes a : addrval;
-    fixes e : eventdata;
-    fixes w : List<addrval>;
-    assumes RLH_ECBData_P(DMbox(Vptr(a)), AbsECB{{edata: e, wset: w}});
-    shows RLH_ECBData_P(DMbox(Vnull),  AbsECB{{edata: absmbox(Vnull), wset: w}})
-    proof { auto }
-}
-
-// OSMutex_common.v
-// Original name: RLH_ECBData_p_high_mbox_acpt_hold
-// Setting the owning task of mutex in both low and high-level data
-query RLH_ECBData_p_high_mutex_acpt_hold {
-    fixes x : int32u;
-    fixes i6 : int32u;
-    fixes e : eventdata;
-    fixes w0 : List<addrval>;
-    fixes tid : addrval;
-    assumes i6 < 64;
-    assumes (x >> 8) < i6;
-    assumes RLH_ECBData_P(DMutex(Vint32(x), Vnull), AbsECB{{edata: e, wset: w0}});
-    shows RLH_ECBData_P(
-        DMutex(Vint32((x & 65280) | i6), Vptr(tid)),
-        AbsECB{{edata: absmutexsem(((x & 65280) | i6) >> 8, some(owner{{tid: tid, oprio: i6}})),
-                wset: w0}}
-    )
-    proof { auto }
-}
-
-/**************************************
-* Relation betwen TCBList and ECBList *
-**************************************/
-
-/*
- * Relationship between high-level TCB and ECB, queue case.
- *
- * 1. For each queue eid, if task tid is in the wait-set of the queue,
- *    then the corresponding TCB must be waiting for the same queue.
- * 2. For each task tid, if the task is waiting for queue eid, then
- *    the task must be in the wait-set of the queue.
- */
-predicate RH_TCBList_ECBList_Q_P(ECBMap ecbls, TCBMap tcbls) {
-    forall (addrval eid in ecbls) {
-        switch (get(eid, ecbls)) {
-            case AbsECB{{edata: absmsgq(_, _), wset: qwaitset}}:
-                forall (addrval tid in qwaitset) {
-                    indom(tid, tcbls) &&
-                    switch (get(tid, tcbls)) {
-                        case AbsTCB{{stat: wait(os_stat_q(eid2), _)}}:
-                            eid == eid2;
-                        default: false;
-                    }
-                };
-            default: true;
-        }
-    } &&
-    forall (addrval tid in tcbls) {
-        switch (get(tid, tcbls)) {
-            case AbsTCB{{stat: wait(os_stat_q(eid), _)}}:
-                indom(eid, ecbls) &&
-                switch (get(eid, ecbls)) {
-                    case AbsECB{{edata: absmsgq(_, _), wset: qwaitset}}:
-                        inlist(tid, qwaitset);
-                    default: false;
-                };
-            default: true;
-        }
-    }
-}
-
-/*
- * Relationship between high-level TCB and ECB: semaphore case.
- *
- * 1. For each semaphore eid, if a task is in the waiting list of the
- *    semaphore, then the corresopnding TCB must be waiting for the
- *    same semaphore.
- * 2. For each task tid, if the task is waiting for semaphore eid,
- *    then the task is in the waiting list of the semaphore.
- */
-predicate RH_TCBList_ECBList_SEM_P(ECBMap ecbls, TCBMap tcbls) {
-    forall (addrval eid in ecbls) {
-        switch (get(eid, ecbls)) {
-            case AbsECB{{edata: abssem(_), wset: wls}}:
-                forall (addrval tid in wls) {
-                    indom(tid, tcbls) &&
-                    switch (get(tid, tcbls)) {
-                        case AbsTCB{{stat: wait(os_stat_sem(eid2), _)}}:
-                            eid == eid2;
-                        default: false;
-                    }
-                };
-            default: true;
-        }
-    } &&
-    forall (addrval tid in tcbls) {
-        switch (get(tid, tcbls)) {
-            case AbsTCB{{stat: wait(os_stat_sem(eid), _)}}:
-                indom(eid, ecbls) &&
-                switch (get(eid, ecbls)) {
-                    case AbsECB{{edata: abssem(_), wset: wls}}:
-                        inlist(tid, wls);
-                    default: false;
-                };
-            default: true;
-        }
-    }
-}
-
-/*
- * Relationship between high-level TCB and ECB: mailbox case.
- *
- * 1. For each mailbox eid, if the task tid is in the waiting list
- *    of the mailbox, then the corresponding TCB of the task is
- *    waiting for the same mailbox.
- * 2. For each task tid, if the task is waiting for mailbox eid,
- *    then the task is in the waiting list of the mailbox.
- */
-predicate RH_TCBList_ECBList_MBOX_P(ECBMap ecbls, TCBMap tcbls) {
-    forall (addrval eid in ecbls) {
-        switch (get(eid, ecbls)) {
-            case AbsECB{{edata: absmbox(_), wset: wls}}:
-                forall (addrval tid in wls) {
-                    indom(tid, tcbls) &&
-                    switch (get(tid, tcbls)) {
-                        case AbsTCB{{stat: wait(os_stat_mbox(eid2), _)}}:
-                            eid == eid2;
-                        default: false;
-                    }
-                };
-            default: true;
-        }
-    } &&
-    forall (addrval tid in tcbls) {
-        switch (get(tid, tcbls)) {
-            case AbsTCB{{stat: wait(os_stat_mbox(eid), _)}}:
-                indom(eid, ecbls) &&
-                switch (get(eid, ecbls)) {
-                    case AbsECB{{edata: absmbox(_), wset: wls}}:
-                        inlist(tid, wls);
-                    default: false;
-                };
-            default: true;
-        }
-    }
-}
-
-/*
- * If a mutex is owned by a task, then the owner is in the TCB mapping.
- */
-predicate RH_TCBList_ECBList_MUTEX_OWNER(ECBMap ecbls, TCBMap tcbls) {
-    forall (addrval eid in ecbls) {
-        switch (get(eid, ecbls)) {
-            case AbsECB{{edata: absmutexsem(P, some(owner{{tid: tid}})), wset: wls}}:
-                indom(tid, tcbls);
-            default: true;
-        }
-    }
-}
-
-/*
- * 1. For any mutex eid, if a task is in the waiting list of the mutex,
- *    then the corresponding TCB of the task is waiting for the same
- *    mutex.
- * 2. For any task tid, if the task is waiting for a mutex, then the
- *    task is in the waiting list of that mutex.
- */
-predicate RH_TCBList_ECBList_MUTEX_P(ECBMap ecbls, TCBMap tcbls) {
-    forall (addrval eid in ecbls) {
-        switch (get(eid, ecbls)) {
-            case AbsECB{{edata: absmutexsem(_, _), wset: wls}}:
-                forall (addrval tid in wls) {
-                    indom(tid, tcbls) &&
-                    switch (get(tid, tcbls)) {
-                        case AbsTCB{{stat: wait(os_stat_mutexsem(eid2), _)}}:
-                            eid == eid2;
-                        default: false;
-                    }
-                };
-            default: true;
-        }
-    } &&
-    forall (addrval tid in tcbls) {
-        switch (get(tid, tcbls)) {
-            case AbsTCB{{stat: wait(os_stat_mutexsem(eid), _)}}:
-                indom(eid, ecbls) &&
-                switch (get(eid, ecbls)) {
-                    case AbsECB{{edata: absmutexsem(_, _), wset: wls}}:
-                        inlist(tid, wls);
-                    default: false;
-                };
-            default: true;
-        }
-    } &&
-    RH_TCBList_ECBList_MUTEX_OWNER(ecbls, tcbls)
-}
-
-/*
- * Overall relationship between high-level TCB and ECB.
- */
-predicate RH_TCBList_ECBList_P(ECBMap ecbls, TCBMap tcbls) {
-    RH_TCBList_ECBList_Q_P(ecbls, tcbls) &&
-    RH_TCBList_ECBList_SEM_P(ecbls, tcbls) &&
-    RH_TCBList_ECBList_MBOX_P(ecbls, tcbls) &&
-    RH_TCBList_ECBList_MUTEX_P(ecbls, tcbls)
-}
-
-// Mbox_common.v
-// Setting the message of a mailbox
-// Note this covers the case mbox_acpt_rh_tcblist_ecblist_p_hold
-// (setting message to Vnull).
-query mbox_rh_tcblist_ecblist_p_hold {
-    fixes eid : addrval;
-    fixes ecbls : ECBMap;
-    fixes tcbls : TCBMap;
-    fixes ecbls2 : ECBMap;
-    fixes m : val;
-    fixes m2 : val;
-    fixes w : List<addrval>;
-    assumes indom(eid, ecbls);
-    assumes get(eid, ecbls) == AbsECB{{edata: absmbox(m), wset: w}};
-    assumes RH_TCBList_ECBList_P(ecbls, tcbls);
-    assumes mapUpdate(eid, AbsECB{{edata: absmbox(m2), wset: w}}, ecbls, ecbls2);
-    shows RH_TCBList_ECBList_P(ecbls2, tcbls)
-    proof { auto }
-}
-
-// sem_common.v
-// Creating a semaphore
-
-query semcre_RH_TCBList_ECBList_P {
-    fixes eid : addrval;
-    fixes ecbls : ECBMap;
-    fixes tcbls : TCBMap;
-    fixes ecbls2 : ECBMap;
-    fixes i : int32u;
-    assumes !indom(eid, ecbls);
-    assumes RH_TCBList_ECBList_P(ecbls, tcbls);
-    assumes mapUpdate(eid, AbsECB{{edata: abssem(i), wset: nil}}, ecbls, ecbls2);
-    shows RH_TCBList_ECBList_P(ecbls2, tcbls)
-    proof { auto(inlist_simps1<addrval>) }
-}
-
-// tasksuspend.v
-/* TODO
-query ECBList_P_preserve {
-    fixes vptr : val;
-    fixes ecbList : List<EventCtr>;
-    fixes edls : List<leventdata>;
-    fixes ecbls : ECBMap;
-    fixes tcbls : TCBMap;
-    fixes tcbls_new : TCBMap;
-    fixes tid : addrval;
-    fixes prio1 : int32u;
-    fixes st1 : taskstatus;
-    fixes msg1 : val;
-    fixes sus1 : bool;
-    assumes H1: ECBList_P(vptr, Vnull, ecbList, edls, ecbls, tcbls);
-    assumes H2: get(tid, tcbls) == AbsTCB{{prio: prio1, stat: st1, msg: msg1, sus: sus1}};
-    assumes H3: mapUpdate(tid, AbsTCB{{prio: prio1, stat: st1, msg: msg1, sus: true}}, tcbls, tcbls_new);
-    shows ECBList_P(vptr, Vnull, ecbList, edls, ecbls, tcbls_new)
-    proof {
-        induction(ecbList){
-            case nil: auto;
-            case cons(ecb, ecbList2):
-                cases(vptr) {
-                    case Vptr(eid):
-                        simplify;;
-                        split_conj(H1, [H11, H12]);
-                    default: auto;
-                };
-        }
-    }
-}
-*/
 
 query RL_TCBblk_P_suspend {
     fixes tcb : TCB;
     assumes RL_TCBblk_P(tcb);
-    shows RL_TCBblk_P(tcb{stat := tcb.stat | OS_STAT_SUSPEND})
-    proof { auto }
+    shows RL_TCBblk_P(tcb{OSTCBStat := tcb.OSTCBStat | OS_STAT_SUSPEND})
+    proof { seq_auto }
+}
+
+function OSTaskSuspend(int8u prio, Global global) -> Global {
+    if (!indom(prio, global.OSTCBPrioTbl)) {
+        global
+    } else {
+        let tcb = get(prio, global.OSTCBPrioTbl) in
+        let global2 = unset_bitmap_prio(global, tcb) in
+            global2{|OSTCBPrioTbl[prio].OSTCBStat := tcb.OSTCBStat | OS_STAT_SUSPEND|}
+        end
+        end
+    }
+}
+
+function OSTaskSuspendAbs(int8u prio, AbsGlobal absGlobal) -> AbsGlobal {
+    if (!indom(prio, absGlobal.tcbMap)) {
+        absGlobal
+    } else {
+        absGlobal{|tcbMap[prio].sus := true|}
+    }
 }
 
 query R_TCB_Status_P_suspend {
     fixes tcb : TCB;
-    fixes rtbl : int32u[];
-    fixes rtbl2 : int32u[];
+    fixes rtbl : Seq<int8u>;
+    fixes rtbl2 : Seq<int8u>;
     fixes abstcb : AbsTCB;
-    assumes prio_not_in_tbl(tcb.prio, rtbl2);
-    assumes tcb.prio < 64;
+    assumes prio_not_in_tbl(tcb.OSTCBPrio, rtbl2);
     assumes R_TCB_Status_P(tcb, rtbl, abstcb);
-    shows R_TCB_Status_P(tcb{stat := tcb.stat | OS_STAT_SUSPEND}, rtbl2, abstcb{sus := true})
-    proof { auto }
+    shows R_TCB_Status_P(tcb{OSTCBStat := tcb.OSTCBStat | OS_STAT_SUSPEND}, rtbl2, abstcb{sus := true})
+    proof { seq_auto }
 }
 
-query R_PrioTbl_P_suspend {
-    fixes ptbl : val[];
-    fixes tcbls : TCBMap;
-    fixes tcbls_new : TCBMap;
-    fixes vhold : addrval;
-    fixes tid : addrval;
-    fixes abstcb : AbsTCB;
-    assumes R_PrioTbl_P(ptbl, tcbls, vhold);
-    assumes indom(tid, tcbls) && get(tid, tcbls) == abstcb;
-    assumes mapUpdate(tid, abstcb{sus := true}, tcbls, tcbls_new);
-    shows R_PrioTbl_P(ptbl, tcbls_new, vhold)
-    proof { auto }
+query RLH_TCB_P_suspend1 {
+    fixes global: Global;
+    fixes prio: int8u;
+    fixes global2: Global;
+    assumes global2 == OSTaskSuspend(prio, global);
+    assumes prio >= 0 && prio < 64;
+    assumes H2: RL_TCB_P(global);
+    assumes H3: RL_Tbl_Grp_P(global);
+    shows RL_TCB_P(global2)
+    proof { seq_auto }
 }
 
-query RH_TCBList_ECBList_P_suspend {
-    fixes tid : addrval;
-    fixes ecbls : ECBMap;
-    fixes tcbls : TCBMap;
-    fixes tcbls2 : TCBMap;
-    fixes prio1 : int32u;
-    fixes st1 : taskstatus;
-    fixes msg1 : val;
-    fixes sus1 : bool;
-    assumes indom(tid, tcbls);
-    assumes get(tid, tcbls) == AbsTCB{{prio: prio1, stat: st1, msg: msg1, sus: sus1}};
-    assumes mapUpdate(tid, AbsTCB{{prio: prio1, stat: st1, msg: msg1, sus: true}}, tcbls, tcbls2);
-    assumes RH_TCBList_ECBList_P(ecbls, tcbls);
-    shows RH_TCBList_ECBList_P(ecbls, tcbls2)
-    proof { auto }
+query RLH_TCB_P_suspend2 {
+    fixes global: Global;
+    fixes prio: int8u;
+    fixes global2: Global;
+    assumes global2 == OSTaskSuspend(prio, global);
+    assumes prio >= 0 && prio < 64;
+    assumes H2: RL_TCB_P(global);
+    assumes H3: RL_Tbl_Grp_P(global);
+    shows RL_Tbl_Grp_P(global2)
+    proof { seq_auto }
 }
 
-// Mbox_common.v
-
-query RH_TCBList_ECBList_P_high_block_hold_mbox {
-    fixes ecbls : ECBMap;
-    fixes tcbls : TCBMap;
-    fixes qid : addrval;
-    fixes pcur : addrval;
-    fixes msgList : val;
-    fixes wl: List<addrval>;
-    fixes m1: val;
-    fixes m2 : val;
-    fixes sus1 : bool;
-    fixes sus2 : bool;
-    fixes prio : int32u;
-    fixes ecbls2 : ECBMap;
-    fixes tcbls2 : TCBMap;
-    fixes time : int32u;
-    assumes indom(qid, ecbls);
-    assumes get(qid, ecbls) == AbsECB{{edata: absmbox(msgList), wset: wl}};
-    assumes indom(pcur, tcbls);
-    assumes get(pcur, tcbls) == AbsTCB{{prio: prio, stat: rdy, msg: m1, sus: sus1}};
-    assumes RH_TCBList_ECBList_MBOX_P(ecbls, tcbls);
-    assumes mapUpdate(qid, AbsECB{{edata: absmbox(msgList), wset: cons(pcur, wl)}}, ecbls, ecbls2);
-    assumes mapUpdate(pcur, AbsTCB{{prio: prio, stat: wait(os_stat_mbox(qid), time), msg: m2, sus: sus2}}, tcbls, tcbls2);
-    shows RH_TCBList_ECBList_MBOX_P(ecbls2, tcbls2)
-    proof { auto }
+query RLH_TCB_P_suspend3 {
+    fixes global: Global;
+    fixes absGlobal: AbsGlobal;
+    fixes prio: int8u;
+    fixes global2: Global;
+    fixes absGlobal2: AbsGlobal;
+    assumes global2 == OSTaskSuspend(prio, global);
+    assumes absGlobal2 == OSTaskSuspendAbs(prio, absGlobal);
+    assumes prio >= 0 && prio < 64;
+    assumes H1: RLH_TCB_P(global, absGlobal);
+    assumes H2: RL_TCB_P(global);
+    assumes H3: RL_Tbl_Grp_P(global);
+    shows RLH_TCB_P(global2, absGlobal2)
+    proof { seq_auto }
 }
 
-query R_ECB_ETbl_P_high_tcb_block_hold {
-    fixes tcbls : TCBMap;
-    fixes tcbls_new : TCBMap;
-    fixes eid : addrval;
-    fixes ecb : EventCtr;
-    fixes tid : addrval;
-    fixes abstcb : AbsTCB;
-    fixes y : int32u;
-    fixes time : int32u;
-    assumes Hprio : 0 < abstcb.prio && abstcb.prio < 64;
-    assumes Hose : ecb.OSEventType == OS_EVENT_TYPE_MBOX;
-    assumes H1 : R_ECB_ETbl_P(eid, ecb, tcbls);
-    assumes H2 : indom(tid, tcbls) && get(tid, tcbls) == abstcb;
-    assumes Hxy : y == abstcb.prio >> 3;
-    assumes Hmapup : mapUpdate(tid, abstcb{stat := wait(os_stat_mbox(eid), time)}, tcbls, tcbls_new);
-    shows R_ECB_ETbl_P(eid, ecb{OSEventGrp := ecb.OSEventGrp | (1 << y),
-                                etbl := ecb.etbl[y := ecb.etbl[y] | (1 << (abstcb.prio & 7))]},
-                       tcbls_new)
-    proof { auto }
-}
-
-// The following theorems comes from OSTimeDlyPure.v
-
-query R_PrioTbl_P_hold1 {
-    fixes tid : addrval;
-    fixes st : taskstatus;
-    fixes tcbls : TCBMap;
-    fixes ptbl : val[];
-    fixes tcbls0 : TCBMap;
-    fixes vhold : addrval;
-    fixes abstcb : AbsTCB;
-    assumes R_PrioTbl_P(ptbl, tcbls, vhold);
-    assumes indom(tid, tcbls) && get(tid, tcbls) == abstcb;
-    assumes mapUpdate(tid, abstcb{stat := st}, tcbls, tcbls0);
-    shows R_PrioTbl_P(ptbl, tcbls0, vhold)
-    proof { auto }
-}
-
-query RH_TCBList_ECBList_P_hold1 {
-    fixes ecbls : ECBMap;
-    fixes tcbls : TCBMap;
-    fixes tcbls_new : TCBMap;
-    fixes tid : addrval;
-    fixes abstcb : AbsTCB;
-    fixes i : int32u;
-    assumes RH_TCBList_ECBList_P(ecbls, tcbls);
-    assumes indom(tid, tcbls) && get(tid, tcbls) == abstcb;
-    assumes switch (abstcb.stat) {
-        case rdy: true;
-        case wait(os_stat_time, _): true;
-        default: false;
-    };
-    assumes mapUpdate(tid, abstcb{stat := wait(os_stat_time, i)}, tcbls, tcbls_new);
-    shows RH_TCBList_ECBList_P(ecbls, tcbls_new)
-    proof { auto }
-}
-
-query ecb_etbl_prop {
-    fixes tid : addrval;
-    fixes tcbls : TCBMap;
-    fixes tcbls_new : TCBMap;
-    fixes abstcb : AbsTCB;
-    fixes eid : addrval;
-    fixes ecb : EventCtr;
-    fixes i : int32u;
-    assumes indom(tid, tcbls) && get(tid, tcbls) == abstcb;
-    assumes switch (abstcb.stat) {
-        case rdy: true;
-        case wait(os_stat_time, _): true;
-        default: false;
-    };
-    assumes mapUpdate(tid, abstcb{stat := wait(os_stat_time, i)}, tcbls, tcbls_new);
-    assumes R_ECB_ETbl_P(eid, ecb, tcbls);
-    shows R_ECB_ETbl_P(eid, ecb, tcbls_new)
-    proof { auto }
-}
-
-query low_stat_rdy_imp_high {
-    fixes tcb : TCB;
-    fixes rtbl : int32u[];
-    fixes abstcb : AbsTCB;
-    assumes RL_TCBblk_P(tcb);
-    assumes R_TCB_Status_P(tcb, rtbl, abstcb);
-    assumes tcb.stat == OS_STAT_RDY;
-    assumes tcb.dly == 0;
-    shows abstcb.stat == rdy
-    proof { auto }
-}
-
-query low_stat_nordy_imp_high {
-    fixes tcb : TCB;
-    fixes rtbl : int32u[];
-    fixes abstcb : AbsTCB;
-    assumes R_TCB_Status_P(tcb, rtbl, abstcb);
-    assumes (tcb.stat != OS_STAT_RDY || tcb.dly != 0);
-    shows !(abstcb.stat == rdy && abstcb.sus == false)
-    proof { auto }
-}
-
-query RLH_Rdy_prioneq_prop_hold {
-    fixes tcb : TCB;
-    fixes rtbl : int32u[];
-    fixes abstcb : AbsTCB;
-    fixes prio : int32u;
-    assumes prio != tcb.prio;
-    assumes RLH_RdyI_P(tcb, rtbl, abstcb);
-    shows let grp = rtbl[prio >> 3] in
-            RLH_RdyI_P(tcb, rtbl[prio >> 3 := grp & ~(1 << (prio & 7))], abstcb)
-          end
-    proof { auto }
-}
-
-query RHL_Rdy_prioneq_prop_hold {
-    fixes tcb : TCB;
-    fixes rtbl : int32u[];
-    fixes abstcb : AbsTCB;
-    fixes prio : int32u;
-    assumes prio != tcb.prio;
-    assumes prio < 64;
-    assumes RHL_RdyI_P(tcb, rtbl, abstcb);
-    shows let grp = rtbl[prio >> 3] in
-            RHL_RdyI_P(tcb, rtbl[prio >> 3 := grp & ~(1 << (prio & 7))], abstcb)
-          end
-    proof { auto }
-}
-
-query RLH_Suspend_prioneq_prop_hold {
-    fixes tcb : TCB;
-    fixes rtbl : int32u[];
-    fixes abstcb : AbsTCB;
-    fixes prio : int32u;
-    assumes prio != tcb.prio;
-    assumes prio < 64;
-    assumes RLH_Suspend_P(tcb, rtbl, abstcb);
-    shows let grp = rtbl[prio >> 3] in
-            RLH_Suspend_P(tcb, rtbl[prio >> 3 := grp & ~(1 << (prio & 7))], abstcb)
-          end
-    proof { auto }
-}
-
-query RHL_Suspend_prioneq_prop_hold {
-    fixes tcb : TCB;
-    fixes rtbl : int32u[];
-    fixes abstcb : AbsTCB;
-    fixes prio : int32u;
-    assumes prio != tcb.prio;
-    assumes prio < 64;
-    assumes RHL_Suspend_P(tcb, rtbl, abstcb);
-    shows let grp = rtbl[prio >> 3] in
-            RHL_Suspend_P(tcb, rtbl[prio >> 3 := grp & ~(1 << (prio & 7))], abstcb)
-          end
-    proof { auto }
-}
-
-query RLH_Wait_prioneq_prop_hold {
-    fixes tcb : TCB;
-    fixes rtbl : int32u[];
-    fixes abstcb : AbsTCB;
-    fixes prio : int32u;
-    assumes prio != tcb.prio;
-    assumes prio < 64;
-    assumes RLH_TCB_Status_Wait_P(tcb, rtbl, abstcb);
-    shows let grp = rtbl[prio >> 3] in
-            RLH_TCB_Status_Wait_P(tcb, rtbl[prio >> 3 := grp & ~(1 << (prio & 7))], abstcb)
-          end
-    proof { auto }
-}
-
-query RHL_Wait_prioneq_prop_hold {
-    fixes tcb : TCB;
-    fixes rtbl : int32u[];
-    fixes abstcb : AbsTCB;
-    fixes prio : int32u;
-    assumes prio != tcb.prio;
-    assumes prio < 64;
-    assumes RHL_TCB_Status_Wait_P(tcb, rtbl, abstcb);
-    shows let grp = rtbl[prio >> 3] in
-            RHL_TCB_Status_Wait_P(tcb, rtbl[prio >> 3 := grp & ~(1 << (prio & 7))], abstcb)
-          end
-    proof { auto }
-}
-
-query rtbl_remove_RL_RTbl_PrioTbl_P_hold {
-    fixes prio : int32u;
-    fixes bitx : int32u;
-    fixes rtbl : int32u[];
-    fixes ptbl : val[];
-    fixes vhold : addrval;
-    assumes 0 <= prio && prio < 64;
-    assumes RL_RTbl_PrioTbl_P(rtbl, ptbl, vhold);
-    shows let grp = rtbl[prio >> 3] in
-            RL_RTbl_PrioTbl_P(rtbl[prio >> 3 := grp & ~(1 << (prio & 7))], ptbl, vhold)
-          end
-    proof { auto }
-}
-
-// Combination of the above results. Only this is really needed.
-query TCBNode_P_prioneq_prop_hold {
-    fixes tcb : TCB;
-    fixes rtbl : int32u[];
-    fixes abstcb : AbsTCB;
-    fixes prio : int32u;
-    assumes prio != abstcb.prio;
-    assumes prio < 64;
-    assumes TCBNode_P(tcb, rtbl, abstcb);
-    shows TCBNode_P(tcb, rtbl[prio >> 3 := rtbl[prio >> 3] & ~(1 << (prio & 7))], abstcb)
-    proof { auto }
-}
-
-query map_get_test {
-    fixes tid2 : addrval;
-    fixes abstcb2 : AbsTCB;
-    fixes tcbls : TCBMap;
-    fixes prio : int32u;
-    fixes tcbls_join : TCBMap;
-    assumes join(tid2, abstcb2, tcbls, tcbls_join);
-    assumes forall (addrval tid in tcbls_join) {
-        get(tid, tcbls_join).prio != prio
-    };
-    shows forall (addrval tid in tcbls) {
-        get(tid, tcbls).prio != prio
-    }
-    proof { auto }
-}
-
-query tcbjoin_join_get_neq {
-    fixes ptcb : addrval;
-    fixes a : AbsTCB;
-    fixes tcbls1 : TCBMap;
-    fixes tcbls2 : TCBMap;
-    assumes join(ptcb, a, tcbls1, tcbls2);
-    shows forall (addrval tid, AbsTCB b) {
-        tid != ptcb -> indom(tid, tcbls1) -> get(tid, tcbls1) == get(tid, tcbls2)
-    }
-    proof { auto }
-}
-
-query TCBList_P_tcb_dly_hold1 {
-    fixes time : int32u;
-    fixes tcb : TCB;
-    fixes rtbl : int32u[];
-    fixes abstcb : AbsTCB;
-    assumes H1 : 0 < time && time <= 65535;
-    assumes H2 : TCBNode_P(tcb, rtbl, abstcb);
-    assumes H3 :
-        switch (abstcb.stat) {
-            case rdy: abstcb.sus == false;
-            case wait(os_stat_time, _): true;
-            default: false;
-        };
-    shows TCBNode_P(
-        tcb{dly := time},
-        rtbl[tcb.y := rtbl[tcb.y] & ~tcb.bitx],
-        abstcb{stat := wait(os_stat_time, time)}
-    )
-    proof { auto }
-}
-
-del_attrib rewrite for TCBNode_P_def
-
-query update_rtbl_tcblist_hold {
-    fixes vptr : val;
-    fixes tcbList: TCBList;
-    fixes rtbl : int32u[];
-    fixes tcbls : TCBMap;
-    fixes prio : int32u;
-    assumes H1: forall (addrval tid in tcbls) {
-        get(tid, tcbls).prio != prio
-    };
-    assumes H2: TCBList_P(vptr, tcbList, rtbl, tcbls);
-    assumes H3: prio < 64;
-    shows TCBList_P(vptr, tcbList, rtbl[prio >> 3 := rtbl[prio >> 3] & ~(1 << (prio & 7))], tcbls)
-    proof {
-        induction(tcbList, [vptr, tcbls]) {
-            case nil: auto;
-            case cons(tcb, rest):
-                cases(vptr) {
-                    case Vptr(tid):
-                        simplify;;
-                        skolemize(H2, [AbsTCB abstcb2, TCBMap tcbls2]);;
-                        split_conj(H2, [H21, H22, H23]);;
-                        match_show(H23) {
-                            1: apply_theorem(TCBNode_P_prioneq_prop_hold, [_, H3, H21]);;
-                               auto;
-                            2: apply_theorem(IH_rest, [_, H22]);;
-                               apply_theorem(map_get_test, [H23, H1]);
-                        };
-                    default: auto;
-                };
-        }
+function OSTaskResume(int8u prio, Global global) -> Global {
+    if (!indom(prio, global.OSTCBPrioTbl)) {
+        global
+    } else {
+        let tcb = get(prio, global.OSTCBPrioTbl) in
+            if (tcb.OSTCBStat & OS_STAT_SUSPEND != OS_STAT_RDY) {
+                let global2 = global{|OSTCBPrioTbl[prio].OSTCBStat := tcb.OSTCBStat & ~OS_STAT_SUSPEND|} in
+                let tcb2 = get(prio, global2.OSTCBPrioTbl) in
+                    if (tcb2.OSTCBStat == OS_STAT_RDY && tcb2.OSTCBDly == 0) {
+                        set_bitmap_prio(global2, tcb2)
+                    } else {
+                        global2
+                    }
+                end
+                end
+            } else {
+                global
+            }
+        end
     }
 }
 
-query TCBList_P_tcb_dly_hold {
-    fixes tcbList : TCBList;
-    fixes rtbl : int32u[];
-    fixes vptr : val;
-    fixes tcbls : TCBMap;
-    fixes prio : int32u;
-    fixes ptcb : addrval;
-    assumes H1 : prio < 64;
-    assumes H2 : TCBList_P(vptr, tcbList, rtbl, tcbls);
-    assumes H3 : !indom(ptcb, tcbls);
-    assumes H4 : prio_neq_cur(tcbls, ptcb, prio);
-    shows TCBList_P(vptr, tcbList, rtbl[prio >> 3 := rtbl[prio >> 3] & ~ (1 << (prio & 7))], tcbls)
-    proof {
-        apply_theorem(update_rtbl_tcblist_hold, [_, H2, H1]);;
-        auto
+function OSTaskResumeAbs(int8u prio, AbsGlobal absGlobal) -> AbsGlobal {
+    if (!indom(prio, absGlobal.tcbMap)) {
+        absGlobal
+    } else {
+        absGlobal{|tcbMap[prio].sus := false|}
     }
 }
 
-query TCBList_P_tcb_dly_hold2 {
-    fixes time : int32u;
-    fixes tcb : TCB;
-    fixes tcbList : TCBList;
-    fixes rtbl : int32u[];
-    fixes ptcb : addrval;
-    fixes abstcb : AbsTCB;
-    fixes tcbls : TCBMap;
-    fixes tcbls2 : TCBMap;
-    assumes H0 : RL_TCBblk_P(tcb);
-    assumes H1 : 0 < time && time <= 65535;
-    assumes H2 : TCBList_P(Vptr(ptcb), cons(tcb, tcbList), rtbl, tcbls);
-    assumes H3 : indom(ptcb, tcbls) && get(ptcb, tcbls) == abstcb;
-    assumes H4 :
-        switch (abstcb.stat) {
-            case rdy: abstcb.sus == false;
-            case wait(os_stat_time, _): true;
-            default: false;
-        };
-    assumes H5 : prio_neq_cur(tcbls, ptcb, tcb.prio);
-    assumes H6 : mapUpdate(ptcb, abstcb{stat := wait(os_stat_time, time)}, tcbls, tcbls2);
-    shows TCBList_P(Vptr(ptcb), cons(tcb{dly := time}, tcbList), rtbl[tcb.y := rtbl[tcb.y] & ~tcb.bitx], tcbls2)
-    proof { 
-        simplify;;
-        skolemize(H2, [AbsTCB abstcb2, TCBMap tcbls3]);;
-        split_conj(H2, [H21, H22, H23]);;
-        exists(abstcb{stat := wait(os_stat_time, time)}, tcbls3) {
-            1: apply_theorem(TCBList_P_tcb_dly_hold1, [H1]) {
-                1: auto;
-                2: auto;
-            };
-            2: change (tcb.y == tcb.prio >> 3) { auto };;
-               change (tcb.bitx == (1 << (tcb.prio & 7))) { auto };;
-               assert (H5a: prio_neq_cur(tcbls3, ptcb, tcb.prio)) { auto };;
-               apply_theorem(TCBList_P_tcb_dly_hold, [_, H22, _, H5a]) {
-                 1: auto;
-                 2: auto;
-               };
-            3: auto;
-        }
-    }
+query RLH_TCB_P_resume1 {
+    fixes global: Global;
+    fixes prio: int8u;
+    fixes global2: Global;
+    assumes global2 == OSTaskResume(prio, global);
+    assumes prio >= 0 && prio < 64;
+    assumes H2: RL_TCB_P(global);
+    assumes H3: RL_Tbl_Grp_P(global);
+    shows RL_TCB_P(global2)
+    proof { seq_auto }
 }
 
-// task_pure.v
-
-query r_priotbl_p_hold_for_del_a_tcb {
-    fixes ptbl : val[];
-    fixes abstcb : AbsTCB;
-    fixes vhold : addrval;
-    fixes head : addrval;
-    fixes tcbls : TCBMap;
-    fixes tcbls_left : TCBMap;
-    assumes H1 : 0 <= abstcb.prio && abstcb.prio < 64;
-    assumes H2 : R_PrioTbl_P(ptbl, tcbls, vhold);
-    assumes H3 : join(head, abstcb, tcbls_left, tcbls);
-    shows R_PrioTbl_P(ptbl[abstcb.prio := Vnull], tcbls_left, vhold)
-    proof { auto }
+query RLH_TCB_P_resume2 {
+    fixes global: Global;
+    fixes prio: int8u;
+    fixes global2: Global;
+    assumes global2 == OSTaskResume(prio, global);
+    assumes prio >= 0 && prio < 64;
+    assumes H2: RL_TCB_P(global);
+    assumes H3: RL_Tbl_Grp_P(global);
+    shows RL_Tbl_Grp_P(global2)
+    proof { seq_auto }
 }
 
-query priowaitinq_is_prio_in_tbl {
-    fixes prio : int32u;
-    fixes rtbl : int32u[];
-    assumes 0 <= prio && prio < 64;
-    assumes prio_in_tbl(prio, rtbl);
-    assumes exists(int32u z) { rtbl[prio >> 3] == z };
-    shows PrioWaitInQ(prio, rtbl)
-    proof { auto }
+query RLH_TCB_P_resume3 {
+    fixes global: Global;
+    fixes absGlobal: AbsGlobal;
+    fixes prio: int8u;
+    fixes global2: Global;
+    fixes absGlobal2: AbsGlobal;
+    assumes global2 == OSTaskResume(prio, global);
+    assumes absGlobal2 == OSTaskResumeAbs(prio, absGlobal);
+    assumes prio >= 0 && prio < 64;
+    assumes H1: RLH_TCB_P(global, absGlobal);
+    assumes H2: RL_TCB_P(global);
+    assumes H3: RL_Tbl_Grp_P(global);
+    shows RLH_TCB_P(global2, absGlobal2)
+    proof { seq_auto }
 }
 
 /*
- * Lemma used in task_pure.v.
+ * Refinement relation between low-level queue and high-level
+ * message list.
  */
-query ecb_no_exists_tcb_sub {
-    fixes ecbls1 : ECBMap;
-    fixes ecbls2 : ECBMap;
-    fixes tcbls : TCBMap;
-    assumes subseteq(ecbls1, ecbls2);
-    assumes ecb_no_exists_tcb(ecbls2, tcbls);
-    shows ecb_no_exists_tcb(ecbls1, tcbls)
-    proof { auto }
+predicate MatchLHMsgList(OS_Q q, Seq<addrval> msgl) {
+    let qin = q.OSQIn in
+    let qout = q.OSQOut in
+    let qens = q.OSQEntries in
+    let msgtbl = q.OSQData in
+    let qsize = |msgtbl| in
+        0 <= qin && qin < qsize &&
+        0 <= qout && qout < qsize &&
+        (qin > qout -> msgl == msgtbl[qout:qin] &&
+                       qens == qin - qout) &&
+        (qin < qout -> msgl == msgtbl[qout:qsize] ++ msgtbl[0:qin] &&
+                       qens == (qsize - qout) + qin) &&
+        (qout == qin -> qens == 0 || qens == qsize) &&
+        (qout == qin -> qens == 0 -> msgl == []) &&
+        (qout == qin && qens == qsize ->
+         msgl == msgtbl[qout:qsize] ++ msgtbl[0:qin])
+    end
+    end
+    end
+    end
+    end
 }
 
-query R_Prio_No_Dup_hold_for_subset {
-    fixes tid : addrval;
-    fixes abstcb : AbsTCB;
-    fixes tcbls1 : TCBMap;
-    fixes tcbls2 : TCBMap;
-    assumes join(tid, abstcb, tcbls1, tcbls2);
-    shows R_Prio_No_Dup(tcbls2) -> R_Prio_No_Dup(tcbls1)
-    proof { auto }
+query HighestPrio {
+    fixes global: Global;
+    fixes x: int8u;
+    fixes y: int8u;
+    fixes prio: int8u;
+    assumes y == OSUnMapTbl[int(global.OSRdyGrp)];
+    assumes x == OSUnMapTbl[int(global.OSRdyTbl[int(y)])];
+    assumes prio == (y << 3) + x;
+    assumes RL_Tbl_Grp_P(global);
+    assumes global.OSRdyGrp != 0;
+    shows forall (int8u prio1) {
+        prio1 < prio -> prio_not_in_tbl(prio1, global.OSRdyTbl)
+    } && prio_in_tbl(prio, global.OSRdyTbl)
+    proof { seq_auto }
 }
 
-query TcbIsWait {
-    fixes tcb : TCB;
-    fixes abstcb : AbsTCB;
-    fixes rtbl : int32u[];
-    assumes R_TCB_Status_P(tcb, rtbl, abstcb);
-    assumes tcb.stat == OS_STAT_SEM || tcb.stat == OS_STAT_Q ||
-            tcb.stat == OS_STAT_MBOX || tcb.stat == OS_STAT_MUTEX || 
-            tcb.stat == (OS_STAT_SEM | OS_STAT_SUSPEND) || tcb.stat == (OS_STAT_Q | OS_STAT_SUSPEND) || 
-            tcb.stat == (OS_STAT_MBOX | OS_STAT_SUSPEND) || tcb.stat == (OS_STAT_MUTEX | OS_STAT_SUSPEND);
-    shows
-        switch (tcb.eptr) {
-            case Vptr(eid): true;
-            default: false;
-        } &&
-        switch (abstcb.stat) {
-            case wait(os_stat_sem(_), dly):
-                dly == tcb.dly;
-            case wait(os_stat_q(_), dly):
-                dly == tcb.dly;
-            case wait(os_stat_mbox(_), dly):
-                dly == tcb.dly;
-            case wait(os_stat_mutexsem(_), dly):
-                dly == tcb.dly;
-            default: false;
+/*
+ * Set priority in event priority map.
+ */
+function set_event_bitmap_prio(Global global, address pevent, TCB tcb) -> Global {
+    let y = int(tcb.OSTCBY) in
+    let bitx = tcb.OSTCBBitX in
+    let global2 = global{|events[pevent].OSEventGrp := get(pevent, global.events).OSEventGrp | tcb.OSTCBBitY|} in
+        global2{|events[pevent].OSEventTbl[y] := get(pevent, global2.events).OSEventTbl[y] | bitx|}
+    end
+    end
+    end
+}
+
+/*
+ * Unset priority in event priority map.
+ */
+function unset_event_bitmap_prio(Global global, address pevent, TCB tcb) -> Global {
+    let y = int(tcb.OSTCBY) in
+    let bitx = tcb.OSTCBBitX in
+    let global2 = global{|events[pevent].OSEventTbl[y] := get(pevent, global.events).OSEventTbl[y] & ~bitx|} in
+        if (get(pevent, global2.events).OSEventTbl[y] == 0) {
+            global2{|events[pevent].OSEventGrp := get(pevent, global2.events).OSEventGrp & ~tcb.OSTCBBitY|}
+        } else {
+            global2
         }
-    proof { auto }
+    end
+    end
+    end
 }
 
-query remove_tid_not_nil {
-    fixes tid : addrval;
-    fixes tidls : List<addrval>;
-    assumes list_remove(tid, tidls) != nil;
-    shows tidls != nil
-    proof { auto }
+function OS_EventTaskWait(Global global, address pevent) -> Global {
+    let global2 = global{|OSTCBPrioTbl[global.OSPrioCur].OSTCBEventPtr := Vptr(pevent)|} in
+    let global3 = unset_bitmap_prio(global2, get(global.OSPrioCur, global.OSTCBPrioTbl)) in
+        set_event_bitmap_prio(global3, pevent, get(global.OSPrioCur, global.OSTCBPrioTbl))
+    end
+    end
+}
+
+function OS_EventTO(Global global, address pevent) -> Global {
+    let global2 = unset_event_bitmap_prio(global, pevent, get(global.OSPrioCur, global.OSTCBPrioTbl)) in
+    let global3 = global2{|OSTCBPrioTbl[global.OSPrioCur].OSTCBStat := OS_STAT_RDY|} in
+        global3{|OSTCBPrioTbl[global.OSPrioCur].OSTCBEventPtr := Vnull|}
+    end
+    end
+}
+
+function OS_EventTaskRdy(Global global, address pevent, addrval msg, int16u msk) -> Global {
+    let event = get(pevent, global.events) in
+    let y = OSUnMapTbl[int(event.OSEventGrp)] in
+    let x = OSUnMapTbl[int(event.OSEventTbl[int(y)])] in
+    let prio = (y << 3) + x in
+    let ptcb = get(prio, global.OSTCBPrioTbl) in
+    let global2 = unset_event_bitmap_prio(global, pevent, ptcb) in
+    let global3 = global2{|OSTCBPrioTbl[prio].OSTCBDly := 0|} in
+    let global4 = global3{|OSTCBPrioTbl[prio].OSTCBEventPtr := Vnull|} in
+    let global5 = global4{|OSTCBPrioTbl[prio].OSTCBMsg := msg|} in
+    let global6 = global5{|OSTCBPrioTbl[prio].OSTCBStat := get(prio, global5.OSTCBPrioTbl).OSTCBStat & ~msk|} in
+        if (get(prio, global6.OSTCBPrioTbl).OSTCBStat == OS_STAT_RDY) {
+            set_bitmap_prio(global6, ptcb)
+        } else {
+            global6
+        }
+    end
+    end
+    end
+    end
+    end
+    end
+    end
+    end
+    end
+    end
+}
+
+/*
+ * First part of OSSemPend (before OS_Sched).
+ *
+ * Assume pevent is in global.events and the event type is OS_EVENT_TYPE_SEM.
+ */
+function OSSemPend1(Global global, address pevent, int16u timeout) -> Global {
+    if (get(pevent, global.events).OSEventCnt > 0) {
+        global{|events[pevent].OSEventCnt := get(pevent, global.events).OSEventCnt - 1|}
+    } else {
+        let global2 = global{|OSTCBPrioTbl[global.OSPrioCur].OSTCBStat :=
+                              get(global.OSPrioCur, global.OSTCBPrioTbl).OSTCBStat | OS_STAT_SEM|} in
+        let global3 = global2{|OSTCBPrioTbl[global.OSPrioCur].OSTCBDly := timeout|} in
+            OS_EventTaskWait(global3, pevent)
+        end
+        end
+    }
+}
+
+/*
+ * Second part of OSSemPend (after OS_Sched)
+ */
+function OSSemPend2(Global global, address pevent) -> Global {
+    if (get(global.OSPrioCur, global.OSTCBPrioTbl).OSTCBStat & OS_STAT_SEM != 0) {
+        OS_EventTO(global, pevent)
+    } else {
+        global{|OSTCBPrioTbl[global.OSPrioCur].OSTCBEventPtr := Vnull|}
+    }
+}
+
+/*
+ * Part of OSSemPost before OS_Sched.
+ */
+function OSSemPost(Global global, address pevent) -> Global {
+    let event = get(pevent, global.events) in
+        if (event.OSEventGrp != 0) {
+            OS_EventTaskRdy(global, pevent, Vnull, OS_STAT_SEM)
+        } else {
+            if (event.OSEventCnt < 65535) {
+                global{|events[pevent].OSEventCnt := event.OSEventCnt + 1|}
+            } else {
+                global
+            }
+        }
+    end
+}
+
+/*
+ * Invariant on high-level event information.
+ *
+ * For message queue, semaphore and mailbox, correspondence between waitset
+ * being empty with other information.
+ *
+ * For mutex, additional constraints on priority inheritance. The priority of
+ * the mutex is higher (smaller value) than the original priority of owning task.
+ */
+predicate RH_ECB_P (AbsECB absecb) {
+    switch (absecb.edata) {
+        case absmsgq(msgl, qsize):
+            (|msgl| > 0 -> |absecb.wset| == 0) &&
+            (|absecb.wset| > 0 -> |msgl| == 0);
+        case abssem(count):
+            (count > 0 -> |absecb.wset| == 0) &&
+            (|absecb.wset| > 0 -> count == 0);
+        case absmbox(msg):
+            (msg != Vnull -> |absecb.wset| == 0) &&
+            (|absecb.wset| > 0 -> msg == Vnull);
+        case absmutexsem(prio, oprio, owned):
+            (owned == false -> |absecb.wset| == 0) &&
+            (owned == true -> prio < oprio && oprio < 64) &&
+            (|absecb.wset| > 0 -> owned == true) &&
+            prio < 64;
+    }
+}
+
+predicate RH_ECB_P_All(AbsGlobal absGlobal) {
+    forall (address eid in absGlobal.ecbMap) {
+        RH_ECB_P(get(eid, absGlobal.ecbMap))
+    }
+}
+
+/*
+ * Refinement relation between low-level and high-level event information.
+ *
+ * Unlike in the Coq proof, we skip the use of intermediate datatype
+ * EventData. Correspondence of EventData with low-level data is recorded
+ * as follows (AEventData):
+ *
+ * DMsgQ(a, osq, osqblk, msgtbl):
+ *  a: OSEventPtr
+ * DSem(z):
+ *  z: OSEventCnt, z < 65536
+ * DMbox(msg):
+ *  msg: OSEventPtr
+ * DMutex(a, b):
+ *  a: OSEventCnt (lower 8-bits is oprio, upper 8-bits is prio)
+ *  b: OSEventPtr 
+ */
+predicate RLH_ECBData_P (EVENT event, AbsECB absecb) {
+    switch (absecb.edata) {
+        case absmsgq(msgl, qsize):
+            event.OSEventType == OS_EVENT_TYPE_Q &&
+            switch (event.OSQueue) {
+                case none: false;
+                case some(queue):
+                    MatchLHMsgList(queue, msgl) &&
+                    queue.OSQEntries == |msgl| &&
+                    |queue.OSQData| == qsize;
+            };
+        case abssem(count):
+            event.OSEventType == OS_EVENT_TYPE_SEM &&
+            event.OSEventCnt == count &&
+            0 <= count && count < 65536;
+        case absmbox(msg):
+            event.OSEventType == OS_EVENT_TYPE_MBOX &&
+            event.OSEventPtr == msg;
+        case absmutexsem(prio, oprio, owned):
+            event.OSEventType == OS_EVENT_TYPE_MUTEX &&
+            event.OSEventCnt >> 8 == prio &&
+            if (event.OSEventCnt & 255 == 255) {
+                owned == false
+            } else {
+                event.OSEventCnt & 255 == oprio
+                // TODO: investigate whether OSEventPtr is needed
+            };
+    }
+}
+
+predicate RLH_ECBData_P_All(Global global, AbsGlobal absGlobal) {
+    forall (address eid in global.events) {
+        indom(eid, absGlobal.ecbMap) &&
+        RLH_ECBData_P(get(eid, global.events), get(eid, absGlobal.ecbMap))
+    } &&
+    forall (address eid in absGlobal.ecbMap) {
+        indom(eid, global.events)
+    }
+}
+
+/*
+ * The following series of predicates relate the high-level task and event
+ * information.
+ *
+ * They state that a task is in the waiting set of some event info, iff
+ * the task has the corresponding waiting status.
+ */
+predicate RH_TCBList_ECBList_P1(AbsGlobal absGlobal) {
+    forall (address eid in absGlobal.ecbMap) {
+        let absecb = get(eid, absGlobal.ecbMap) in
+            forall (int i) {
+                0 <= i && i < |absecb.wset| ->
+                indom(absecb.wset[i], absGlobal.tcbMap) &&
+                switch (absecb.edata) {
+                    case absmsgq(msgl, qsize):
+                        switch (get(absecb.wset[i], absGlobal.tcbMap)) {
+                            case AbsTCB{{stat: wait(os_stat_q(eid2), dly)}}:
+                                eid == eid2;
+                            default: false;
+                        };
+                    case abssem(count):
+                        switch (get(absecb.wset[i], absGlobal.tcbMap)) {
+                            case AbsTCB{{stat: wait(os_stat_sem(eid2), dly)}}:
+                                eid == eid2;
+                            default: false;
+                        };
+                    case absmbox(msg):
+                        switch (get(absecb.wset[i], absGlobal.tcbMap)) {
+                            case AbsTCB{{stat: wait(os_stat_mbox(eid2), dly)}}:
+                                eid == eid2;
+                            default: false;
+                        };
+                    case absmutexsem(prio, oprio, owned):
+                        switch (get(absecb.wset[i], absGlobal.tcbMap)) {
+                            case AbsTCB{{stat: wait(os_stat_mutexsem(eid2), dly)}}:
+                                eid == eid2;
+                            default: false;
+                        };
+                }
+            }
+        end
+    }
+}
+
+predicate RH_TCBList_ECBList_P2(AbsGlobal absGlobal) {
+    forall (int8u prio in range8(0, 64)) {
+        indom(prio, absGlobal.tcbMap) ->
+        switch (get(prio, absGlobal.tcbMap)) {
+            case AbsTCB{{stat: wait(os_stat_q(eid), dly)}}:
+                indom(eid, absGlobal.ecbMap) &&
+                switch (get(eid, absGlobal.ecbMap)) {
+                    case AbsECB{{edata: absmsgq(msgl, qsize), wset: wset}}:
+                        exists (int j) {
+                            0 <= j && j < |wset| && wset[j] == prio
+                        };
+                    default: false;
+                };
+            case AbsTCB{{stat: wait(os_stat_sem(eid), dly)}}:
+                indom(eid, absGlobal.ecbMap) &&
+                switch (get(eid, absGlobal.ecbMap)) {
+                    case AbsECB{{edata: abssem(count), wset: wset}}:
+                        exists (int j) {
+                            0 <= j && j < |wset| && wset[j] == prio
+                        };
+                    default: false;
+                };
+            case AbsTCB{{stat: wait(os_stat_mbox(eid), dly)}}:
+                indom(eid, absGlobal.ecbMap) &&
+                switch (get(eid, absGlobal.ecbMap)) {
+                    case AbsECB{{edata: absmbox(msg), wset: wset}}:
+                        exists (int j) {
+                            0 <= j && j < |wset| && wset[j] == prio
+                        };
+                    default: false;
+                };
+            case AbsTCB{{stat: wait(os_stat_mutexsem(eid), dly)}}:
+                indom(eid, absGlobal.ecbMap) &&
+                switch (get(eid, absGlobal.ecbMap)) {
+                    case AbsECB{{edata: absmutexsem(prio2, oprio, owned), wset: wset}}:
+                        exists (int j) {
+                            0 <= j && j < |wset| && wset[j] == prio
+                        };
+                    default: false;
+                };
+            default:
+                true;
+        }
+    }
+}
+
+/*
+ * Abstract version of OSSemPend1.
+ *
+ * Assume pevent is in absGlobal.ecbMap.
+ */
+function OSSemPendAbs1(AbsGlobal absGlobal, address pevent, int16u timeout) -> AbsGlobal {
+    switch (get(pevent, absGlobal.ecbMap)) {
+        case AbsECB{{edata: abssem(count), wset: wset}}:
+            if (count > 0) {
+                absGlobal{|ecbMap[pevent].edata := abssem(count - 1)|}
+            } else {
+                let absGlobal2 = absGlobal{|ecbMap[pevent] :=
+                    AbsECB{{edata: abssem(0),
+                            wset: seq_cons(absGlobal.curTask, get(pevent, absGlobal.ecbMap).wset)}}|} in
+                    absGlobal2{|tcbMap[absGlobal.curTask].stat := wait(os_stat_sem(pevent), timeout)|}
+                end
+            };
+        default:
+            absGlobal;
+    }
+}
+
+query OSSemPend1_RH_ECB_P {
+    fixes absGlobal: AbsGlobal;
+    fixes pevent: address;
+    fixes timeout: int16u;
+    fixes absGlobal2: AbsGlobal;
+    assumes indom(pevent, absGlobal.ecbMap);
+    assumes absGlobal2 == OSSemPendAbs1(absGlobal, pevent, timeout);
+    assumes RH_ECB_P_All(absGlobal);
+    shows RH_ECB_P_All(absGlobal2)
+    proof { seq_auto }
+}
+
+predicate RH_CurTask_Ready(AbsGlobal absGlobal) {
+    switch (get(absGlobal.curTask, absGlobal.tcbMap)) {
+        case AbsTCB{{stat: rdy, sus: false}}:
+            true;
+        default:
+            false;
+    }
+}
+
+query OSSemPend1_RH_TCBList_ECBList_P1 {
+    fixes absGlobal: AbsGlobal;
+    fixes pevent: address;
+    fixes timeout: int16u;
+    fixes absGlobal2: AbsGlobal;
+    assumes indom(pevent, absGlobal.ecbMap);
+    assumes absGlobal2 == OSSemPendAbs1(absGlobal, pevent, timeout);
+    assumes RH_CurTask_Ready(absGlobal);
+    assumes RH_TCBList_ECBList_P1(absGlobal);
+    shows RH_TCBList_ECBList_P1(absGlobal2)
+    proof { seq_auto }
+}
+
+query OSSemPend1_RH_TCBList_ECBList_P2 {
+    fixes absGlobal: AbsGlobal;
+    fixes pevent: address;
+    fixes timeout: int16u;
+    fixes absGlobal2: AbsGlobal;
+    assumes indom(pevent, absGlobal.ecbMap);
+    assumes absGlobal2 == OSSemPendAbs1(absGlobal, pevent, timeout);
+    assumes RH_CurTask_Ready(absGlobal);
+    assumes RH_TCBList_ECBList_P2(absGlobal);
+    shows RH_TCBList_ECBList_P2(absGlobal2)
+    proof { seq_auto }
+}
+
+query OSSemPend1_RLH_ECBData_P {
+    fixes global: Global;
+    fixes absGlobal: AbsGlobal;
+    fixes global2: Global;
+    fixes absGlobal2: AbsGlobal;
+    fixes timeout: int16u;
+    fixes pevent: address;
+    assumes indom(pevent, global.events);
+    assumes get(pevent, global.events).OSEventType == OS_EVENT_TYPE_SEM;
+    assumes global2 == OSSemPend1(global, pevent, timeout);
+    assumes absGlobal2 == OSSemPendAbs1(absGlobal, pevent, timeout);
+    assumes RLH_ECBData_P(get(pevent, global.events), get(pevent, absGlobal.ecbMap));
+    shows RLH_ECBData_P(get(pevent, global2.events), get(pevent, absGlobal2.ecbMap))
+    proof { seq_auto }
+}
+
+/*
+ * Abstract version of OSSemPend2.
+ */
+function OSSemPendAbs2(AbsGlobal absGlobal, address pevent) -> AbsGlobal {
+    absGlobal{|tcbMap[absGlobal.curTask].stat := rdy|}
+}
+
+query OSSemPend2_RH_ECB_P {
+    fixes absGlobal: AbsGlobal;
+    fixes pevent: address;
+    fixes absGlobal2: AbsGlobal;
+    assumes indom(pevent, absGlobal.ecbMap);
+    assumes absGlobal2 == OSSemPendAbs2(absGlobal, pevent);
+    assumes RH_ECB_P_All(absGlobal);
+    shows RH_ECB_P_All(absGlobal2)
+    proof { seq_auto }
+}
+
+query OSSemPend2_RH_TCBList_ECBList_P1 {
+    fixes absGlobal: AbsGlobal;
+    fixes pevent: address;
+    fixes absGlobal2: AbsGlobal;
+    assumes indom(pevent, absGlobal.ecbMap);
+    assumes absGlobal2 == OSSemPendAbs2(absGlobal, pevent);
+    assumes RH_CurTask_Ready(absGlobal);
+    assumes RH_TCBList_ECBList_P1(absGlobal);
+    shows RH_TCBList_ECBList_P1(absGlobal2)
+    proof { seq_auto }
+}
+
+query OSSemPend2_RH_TCBList_ECBList_P2 {
+    fixes absGlobal: AbsGlobal;
+    fixes pevent: address;
+    fixes absGlobal2: AbsGlobal;
+    assumes indom(pevent, absGlobal.ecbMap);
+    assumes absGlobal2 == OSSemPendAbs2(absGlobal, pevent);
+    assumes RH_CurTask_Ready(absGlobal);
+    assumes RH_TCBList_ECBList_P2(absGlobal);
+    shows RH_TCBList_ECBList_P2(absGlobal2)
+    proof { seq_auto }
+}
+
+query OSSemPend2_RLH_ECBData_P {
+    fixes global: Global;
+    fixes absGlobal: AbsGlobal;
+    fixes global2: Global;
+    fixes absGlobal2: AbsGlobal;
+    fixes pevent: address;
+    assumes indom(pevent, global.events);
+    assumes get(pevent, global.events).OSEventType == OS_EVENT_TYPE_SEM;
+    assumes global2 == OSSemPend2(global, pevent);
+    assumes absGlobal2 == OSSemPendAbs2(absGlobal, pevent);
+    assumes RLH_ECBData_P(get(pevent, global.events), get(pevent, absGlobal.ecbMap));
+    shows RLH_ECBData_P(get(pevent, global2.events), get(pevent, absGlobal2.ecbMap))
+    proof { seq_auto }
+}
+
+/*
+ * Abstract version of OSSemPost.
+ *
+ * When posting to a semaphore, the task with highest priority is
+ * removed from waiting list. That task is readied. If there are
+ * no tasks in the waiting list, the semaphore count is increased
+ * by 1 (up to 65535).
+ */
+function OSSemPostAbsHelper(AbsGlobal absGlobal, address pevent, int highPrioId) -> AbsGlobal {
+    let highPrio = get(pevent, absGlobal.ecbMap).wset[highPrioId] in
+    let absGlobal2 = absGlobal{|ecbMap[pevent].wset :=
+            seq_remove(highPrioId, get(pevent, absGlobal.ecbMap).wset)|} in
+        absGlobal2{|tcbMap[highPrio].stat := rdy|}
+    end
+    end
+}
+
+predicate unique_prio(Seq<int8u> a) {
+    forall (int i, int j) {
+        0 <= i && i < |a| &&
+        0 <= j && j < |a| && i != j -> a[i] != a[j]
+    }
+}
+
+predicate event_wset_unique(AbsGlobal absGlobal) {
+    forall (address pevent in absGlobal.ecbMap) {
+        unique_prio(get(pevent, absGlobal.ecbMap).wset)
+    }
+}
+
+predicate highPrioIdInWset(Seq<int8u> wset, int highPrioId) {
+    0 <= highPrioId && highPrioId < |wset| &&
+    forall (int i) {
+        0 <= i && i < |wset| -> wset[highPrioId] <= wset[i]
+    }
+}
+
+predicate OSSemPostAbs1(AbsGlobal absGlobal, AbsGlobal absGlobal2, address pevent) {
+    exists (int highPrioId) {
+        highPrioIdInWset(get(pevent, absGlobal.ecbMap).wset, highPrioId) &&
+        absGlobal2 == OSSemPostAbsHelper(absGlobal, pevent, highPrioId)
+    }
+}
+
+query OSSemPost1_RH_ECB_P {
+    fixes absGlobal: AbsGlobal;
+    fixes pevent: address;
+    fixes absGlobal2: AbsGlobal;
+    assumes indom(pevent, absGlobal.ecbMap);
+    assumes |get(pevent, absGlobal.ecbMap).wset| > 0;
+    assumes OSSemPostAbs1(absGlobal, absGlobal2, pevent);
+    assumes RH_ECB_P_All(absGlobal);
+    shows RH_ECB_P_All(absGlobal2)
+    proof { seq_auto }
+}
+
+query OSSemPost1_RH_TCBList_ECBList_P1 {
+    fixes absGlobal: AbsGlobal;
+    fixes pevent: address;
+    fixes absGlobal2: AbsGlobal;
+    assumes indom(pevent, absGlobal.ecbMap);
+    assumes |get(pevent, absGlobal.ecbMap).wset| > 0;
+    assumes OSSemPostAbs1(absGlobal, absGlobal2, pevent);
+    assumes event_wset_unique(absGlobal);
+    assumes RH_TCBList_ECBList_P1(absGlobal);
+    shows RH_TCBList_ECBList_P1(absGlobal2)
+    proof { seq_auto }
+}
+
+query OSSemPost1_RH_TCBList_ECBList_P2 {
+    fixes absGlobal: AbsGlobal;
+    fixes pevent: address;
+    fixes absGlobal2: AbsGlobal;
+    assumes indom(pevent, absGlobal.ecbMap);
+    assumes |get(pevent, absGlobal.ecbMap).wset| > 0;
+    assumes OSSemPostAbs1(absGlobal, absGlobal2, pevent);
+    assumes RH_TCBList_ECBList_P2(absGlobal);
+    shows RH_TCBList_ECBList_P2(absGlobal2)
+    proof { seq_auto }
+}
+
+query OSSemPost1_RLH_ECBData_P {
+    fixes global: Global;
+    fixes absGlobal: AbsGlobal;
+    fixes global2: Global;
+    fixes absGlobal2: AbsGlobal;
+    fixes pevent: address;
+    assumes indom(pevent, global.events);
+    assumes get(pevent, global.events).OSEventGrp != 0;
+    assumes get(pevent, global.events).OSEventType == OS_EVENT_TYPE_SEM;
+    assumes global2 == OSSemPost(global, pevent);
+    assumes OSSemPostAbs1(absGlobal, absGlobal2, pevent);
+    assumes RLH_ECBData_P(get(pevent, global.events), get(pevent, absGlobal.ecbMap));
+    shows RLH_ECBData_P(get(pevent, global2.events), get(pevent, absGlobal2.ecbMap))
+    proof { seq_auto }
+}
+
+function OSSemPostAbs2(AbsGlobal absGlobal, address pevent) -> AbsGlobal {
+    switch (get(pevent, absGlobal.ecbMap)) {
+        case AbsECB{{edata: abssem(count), wset: wset}}:
+            if (count < 65535) {
+                absGlobal{|ecbMap[pevent].edata := abssem(count + 1)|}
+            } else {
+                absGlobal
+            };
+        default: absGlobal;
+    }
+}
+
+query OSSemPost2_RH_ECB_P {
+    fixes absGlobal: AbsGlobal;
+    fixes pevent: address;
+    fixes absGlobal2: AbsGlobal;
+    assumes indom(pevent, absGlobal.ecbMap);
+    assumes |get(pevent, absGlobal.ecbMap).wset| == 0;
+    assumes absGlobal2 == OSSemPostAbs2(absGlobal, pevent);
+    assumes RH_ECB_P_All(absGlobal);
+    shows RH_ECB_P_All(absGlobal2)
+    proof { seq_auto }
+}
+
+query OSSemPost2_RH_TCBList_ECBList_P1 {
+    fixes absGlobal: AbsGlobal;
+    fixes pevent: address;
+    fixes absGlobal2: AbsGlobal;
+    assumes indom(pevent, absGlobal.ecbMap);
+    assumes absGlobal2 == OSSemPostAbs2(absGlobal, pevent);
+    assumes RH_TCBList_ECBList_P1(absGlobal);
+    shows RH_TCBList_ECBList_P1(absGlobal2)
+    proof { seq_auto }
+}
+
+query OSSemPost2_RH_TCBList_ECBList_P2 {
+    fixes absGlobal: AbsGlobal;
+    fixes pevent: address;
+    fixes absGlobal2: AbsGlobal;
+    assumes indom(pevent, absGlobal.ecbMap);
+    assumes absGlobal2 == OSSemPostAbs2(absGlobal, pevent);
+    assumes RH_TCBList_ECBList_P2(absGlobal);
+    shows RH_TCBList_ECBList_P2(absGlobal2)
+    proof { seq_auto }
+}
+
+query OSSemPost2_RLH_ECBData_P {
+    fixes global: Global;
+    fixes absGlobal: AbsGlobal;
+    fixes global2: Global;
+    fixes absGlobal2: AbsGlobal;
+    fixes pevent: address;
+    assumes indom(pevent, global.events);
+    assumes get(pevent, global.events).OSEventGrp == 0;
+    assumes get(pevent, global.events).OSEventType == OS_EVENT_TYPE_SEM;
+    assumes global2 == OSSemPost(global, pevent);
+    assumes absGlobal2 == OSSemPostAbs2(absGlobal, pevent);
+    assumes RLH_ECBData_P(get(pevent, global.events), get(pevent, absGlobal.ecbMap));
+    shows RLH_ECBData_P(get(pevent, global2.events), get(pevent, absGlobal2.ecbMap))
+    proof { seq_auto }
+}
+
+/*
+ * First part of OSMboxPend (before OS_Sched).
+ *
+ * Assume pevent is in global.events and the event type is OS_EVENT_TYPE_MBOX.
+ */
+function OSMboxPend1(Global global, address pevent, int16u timeout) -> Global {
+    if (get(pevent, global.events).OSEventPtr != Vnull) {
+        let msg = get(pevent, global.events).OSEventPtr in
+        let global2 = global{|events[pevent].OSEventPtr := Vnull|} in
+            global2{|OSTCBPrioTbl[global.OSPrioCur].OSTCBMsg := msg|}
+        end
+        end
+    } else {
+        let global2 = global{|OSTCBPrioTbl[global.OSPrioCur].OSTCBStat :=
+                              get(global.OSPrioCur, global.OSTCBPrioTbl).OSTCBStat | OS_STAT_MBOX|} in
+        let global3 = global2{|OSTCBPrioTbl[global.OSPrioCur].OSTCBDly := timeout|} in
+            OS_EventTaskWait(global3, pevent)
+        end
+        end
+    }
+}
+
+/*
+ * Second part of OSMboxPend (after OS_Sched).
+ */
+function OSMboxPend2(Global global, address pevent) -> Global {
+    if (get(global.OSPrioCur, global.OSTCBPrioTbl).OSTCBMsg == Vnull) {
+        OS_EventTO(global, pevent)
+    } else {
+        let global2 = global{|OSTCBPrioTbl[global.OSPrioCur].OSTCBMsg := Vnull|} in
+        let global3 = global2{|OSTCBPrioTbl[global.OSPrioCur].OSTCBStat := OS_STAT_RDY|} in
+            global3{|OSTCBPrioTbl[global.OSPrioCur].OSTCBEventPtr := Vnull|}
+        end
+        end
+    }
+}
+
+/*
+ * Part of OSMboxPost before OS_Sched.
+ *
+ * Assume msg is not null.
+ */
+function OSMboxPost(Global global, address pevent, addrval msg) -> Global {
+    let event = get(pevent, global.events) in
+        if (event.OSEventGrp != 0) {
+            OS_EventTaskRdy(global, pevent, msg, OS_STAT_MBOX)
+        } else {
+            if (event.OSEventPtr != Vnull) {
+                global
+            } else {
+                global{|events[pevent].OSEventPtr := msg|}
+            }
+        }
+    end
+}
+
+/*
+ * Abstract version of OSMboxPend1.
+ *
+ * Assume pevent is in absGlobal.ecbMap.
+ */
+function OSMboxPendAbs1(AbsGlobal absGlobal, address pevent, int16u timeout) -> AbsGlobal {
+    switch (get(pevent, absGlobal.ecbMap)) {
+        case AbsECB{{edata: absmbox(msg), wset: wset}}:
+            if (msg != Vnull) {
+                let absGlobal2 = absGlobal{|ecbMap[pevent].edata := absmbox(Vnull)|} in
+                    absGlobal2{|tcbMap[absGlobal.curTask].msg := msg|}
+                end
+            } else {
+                let absGlobal2 = absGlobal{|ecbMap[pevent] :=
+                    AbsECB{{edata: absmbox(Vnull),
+                            wset: seq_cons(absGlobal.curTask, get(pevent, absGlobal.ecbMap).wset)}}|} in
+                    absGlobal2{|tcbMap[absGlobal.curTask].stat := wait(os_stat_mbox(pevent), timeout)|}
+                end
+            };
+        default:
+            absGlobal;
+    }
+}
+
+query OSMboxPend1_RH_ECB_P {
+    fixes absGlobal: AbsGlobal;
+    fixes pevent: address;
+    fixes timeout: int16u;
+    fixes absGlobal2: AbsGlobal;
+    assumes indom(pevent, absGlobal.ecbMap);
+    assumes absGlobal2 == OSMboxPendAbs1(absGlobal, pevent, timeout);
+    assumes RH_ECB_P_All(absGlobal);
+    shows RH_ECB_P_All(absGlobal2)
+    proof { seq_auto }
+}
+
+query OSMboxPend1_RH_TCBList_ECBList_P1 {
+    fixes absGlobal: AbsGlobal;
+    fixes pevent: address;
+    fixes timeout: int16u;
+    fixes absGlobal2: AbsGlobal;
+    assumes indom(pevent, absGlobal.ecbMap);
+    assumes absGlobal2 == OSMboxPendAbs1(absGlobal, pevent, timeout);
+    assumes RH_CurTask_Ready(absGlobal);
+    assumes RH_TCBList_ECBList_P1(absGlobal);
+    shows RH_TCBList_ECBList_P1(absGlobal2)
+    proof { seq_auto }
+}
+
+query OSMboxPend1_RH_TCBList_ECBList_P2 {
+    fixes absGlobal: AbsGlobal;
+    fixes pevent: address;
+    fixes timeout: int16u;
+    fixes absGlobal2: AbsGlobal;
+    assumes indom(pevent, absGlobal.ecbMap);
+    assumes absGlobal2 == OSMboxPendAbs1(absGlobal, pevent, timeout);
+    assumes RH_CurTask_Ready(absGlobal);
+    assumes RH_TCBList_ECBList_P2(absGlobal);
+    shows RH_TCBList_ECBList_P2(absGlobal2)
+    proof { seq_auto }
+}
+
+query OSMboxPend1_RLH_ECBData_P {
+    fixes global: Global;
+    fixes absGlobal: AbsGlobal;
+    fixes global2: Global;
+    fixes absGlobal2: AbsGlobal;
+    fixes timeout: int16u;
+    fixes pevent: address;
+    assumes indom(pevent, global.events);
+    assumes get(pevent, global.events).OSEventType == OS_EVENT_TYPE_MBOX;
+    assumes global2 == OSMboxPend1(global, pevent, timeout);
+    assumes absGlobal2 == OSMboxPendAbs1(absGlobal, pevent, timeout);
+    assumes RLH_ECBData_P(get(pevent, global.events), get(pevent, absGlobal.ecbMap));
+    shows RLH_ECBData_P(get(pevent, global2.events), get(pevent, absGlobal2.ecbMap))
+    proof { seq_auto }
+}
+
+/*
+ * Abstract version of OSMboxPend2.
+ */
+function OSMboxPendAbs2(AbsGlobal absGlobal, address pevent) -> AbsGlobal {
+    let absGlobal2 = absGlobal{|tcbMap[absGlobal.curTask].msg := Vnull|} in
+        absGlobal2{|tcbMap[absGlobal.curTask].stat := rdy|}
+    end
+}
+
+query OSMboxPend2_RH_ECB_P {
+    fixes absGlobal: AbsGlobal;
+    fixes pevent: address;
+    fixes absGlobal2: AbsGlobal;
+    assumes indom(pevent, absGlobal.ecbMap);
+    assumes absGlobal2 == OSMboxPendAbs2(absGlobal, pevent);
+    assumes RH_ECB_P_All(absGlobal);
+    shows RH_ECB_P_All(absGlobal2)
+    proof { seq_auto }
+}
+
+query OSMboxPend2_RH_TCBList_ECBList_P1 {
+    fixes absGlobal: AbsGlobal;
+    fixes pevent: address;
+    fixes absGlobal2: AbsGlobal;
+    assumes indom(pevent, absGlobal.ecbMap);
+    assumes absGlobal2 == OSMboxPendAbs2(absGlobal, pevent);
+    assumes RH_CurTask_Ready(absGlobal);
+    assumes RH_TCBList_ECBList_P1(absGlobal);
+    shows RH_TCBList_ECBList_P1(absGlobal2)
+    proof { seq_auto }
+}
+
+query OSMboxPend2_RH_TCBList_ECBList_P2 {
+    fixes absGlobal: AbsGlobal;
+    fixes pevent: address;
+    fixes absGlobal2: AbsGlobal;
+    assumes indom(pevent, absGlobal.ecbMap);
+    assumes absGlobal2 == OSMboxPendAbs2(absGlobal, pevent);
+    assumes RH_CurTask_Ready(absGlobal);
+    assumes RH_TCBList_ECBList_P2(absGlobal);
+    shows RH_TCBList_ECBList_P2(absGlobal2)
+    proof { seq_auto }
+}
+
+query OSMboxPend2_RLH_ECBData_P {
+    fixes global: Global;
+    fixes absGlobal: AbsGlobal;
+    fixes global2: Global;
+    fixes absGlobal2: AbsGlobal;
+    fixes pevent: address;
+    assumes indom(pevent, global.events);
+    assumes get(pevent, global.events).OSEventType == OS_EVENT_TYPE_MBOX;
+    assumes global2 == OSMboxPend2(global, pevent);
+    assumes absGlobal2 == OSMboxPendAbs2(absGlobal, pevent);
+    assumes RLH_ECBData_P(get(pevent, global.events), get(pevent, absGlobal.ecbMap));
+    shows RLH_ECBData_P(get(pevent, global2.events), get(pevent, absGlobal2.ecbMap))
+    proof { seq_auto }
+}
+
+/*
+ * Abstract version of OSMboxPost.
+ */
+function OSMboxPostAbsHelper(AbsGlobal absGlobal, address pevent, int highPrioId, addrval msg) -> AbsGlobal {
+    let highPrio = get(pevent, absGlobal.ecbMap).wset[highPrioId] in
+    let absGlobal2 = absGlobal{|ecbMap[pevent].wset :=
+            seq_remove(highPrioId, get(pevent, absGlobal.ecbMap).wset)|} in
+    let absGlobal3 = absGlobal2{|tcbMap[highPrio].stat := rdy|} in
+        absGlobal3{|tcbMap[highPrio].msg := msg|}
+    end
+    end
+    end
+}
+
+predicate OSMboxPostAbs1(AbsGlobal absGlobal, AbsGlobal absGlobal2, address pevent, addrval msg) {
+    exists (int highPrioId) {
+        highPrioIdInWset(get(pevent, absGlobal.ecbMap).wset, highPrioId) &&
+        absGlobal2 == OSMboxPostAbsHelper(absGlobal, pevent, highPrioId, msg)
+    }
+}
+
+query OSMboxPost1_RH_ECB_P {
+    fixes absGlobal: AbsGlobal;
+    fixes pevent: address;
+    fixes absGlobal2: AbsGlobal;
+    fixes msg: addrval;
+    assumes indom(pevent, absGlobal.ecbMap);
+    assumes |get(pevent, absGlobal.ecbMap).wset| > 0;
+    assumes OSMboxPostAbs1(absGlobal, absGlobal2, pevent, msg);
+    assumes RH_ECB_P_All(absGlobal);
+    shows RH_ECB_P_All(absGlobal2)
+    proof { seq_auto }
+}
+
+query OSMboxPost1_RH_TCBList_ECBList_P1 {
+    fixes absGlobal: AbsGlobal;
+    fixes pevent: address;
+    fixes absGlobal2: AbsGlobal;
+    fixes msg: addrval;
+    assumes indom(pevent, absGlobal.ecbMap);
+    assumes |get(pevent, absGlobal.ecbMap).wset| > 0;
+    assumes OSMboxPostAbs1(absGlobal, absGlobal2, pevent, msg);
+    assumes event_wset_unique(absGlobal);
+    assumes RH_TCBList_ECBList_P1(absGlobal);
+    shows RH_TCBList_ECBList_P1(absGlobal2)
+    proof { seq_auto }
+}
+
+query OSMboxPost1_RH_TCBList_ECBList_P2 {
+    fixes absGlobal: AbsGlobal;
+    fixes pevent: address;
+    fixes absGlobal2: AbsGlobal;
+    fixes msg: addrval;
+    assumes indom(pevent, absGlobal.ecbMap);
+    assumes |get(pevent, absGlobal.ecbMap).wset| > 0;
+    assumes OSMboxPostAbs1(absGlobal, absGlobal2, pevent, msg);
+    assumes RH_TCBList_ECBList_P2(absGlobal);
+    shows RH_TCBList_ECBList_P2(absGlobal2)
+    proof { seq_auto }
+}
+
+query OSMboxPost1_RLH_ECBData_P {
+    fixes global: Global;
+    fixes absGlobal: AbsGlobal;
+    fixes global2: Global;
+    fixes absGlobal2: AbsGlobal;
+    fixes pevent: address;
+    fixes msg: addrval;
+    assumes indom(pevent, global.events);
+    assumes get(pevent, global.events).OSEventGrp != 0;
+    assumes get(pevent, global.events).OSEventType == OS_EVENT_TYPE_MBOX;
+    assumes global2 == OSMboxPost(global, pevent, msg);
+    assumes OSMboxPostAbs1(absGlobal, absGlobal2, pevent, msg);
+    assumes RLH_ECBData_P(get(pevent, global.events), get(pevent, absGlobal.ecbMap));
+    shows RLH_ECBData_P(get(pevent, global2.events), get(pevent, absGlobal2.ecbMap))
+    proof { seq_auto }
+}
+
+function OSMboxPostAbs2(AbsGlobal absGlobal, address pevent, addrval msg_in) -> AbsGlobal {
+    switch (get(pevent, absGlobal.ecbMap)) {
+        case AbsECB{{edata: absmbox(msg), wset: wset}}:
+            if (msg != Vnull) {
+                absGlobal
+            } else {
+                absGlobal{|ecbMap[pevent].edata := absmbox(msg_in)|}
+            };
+        default: absGlobal;
+    }
+}
+
+query OSMboxPost2_RH_ECB_P {
+    fixes absGlobal: AbsGlobal;
+    fixes pevent: address;
+    fixes msg: addrval;
+    fixes absGlobal2: AbsGlobal;
+    assumes indom(pevent, absGlobal.ecbMap);
+    assumes |get(pevent, absGlobal.ecbMap).wset| == 0;
+    assumes absGlobal2 == OSMboxPostAbs2(absGlobal, pevent, msg);
+    assumes RH_ECB_P_All(absGlobal);
+    shows RH_ECB_P_All(absGlobal2)
+    proof { seq_auto }
+}
+
+query OSMboxPost2_RH_TCBList_ECBList_P1 {
+    fixes absGlobal: AbsGlobal;
+    fixes pevent: address;
+    fixes msg: addrval;
+    fixes absGlobal2: AbsGlobal;
+    assumes indom(pevent, absGlobal.ecbMap);
+    assumes absGlobal2 == OSMboxPostAbs2(absGlobal, pevent, msg);
+    assumes RH_TCBList_ECBList_P1(absGlobal);
+    shows RH_TCBList_ECBList_P1(absGlobal2)
+    proof { seq_auto }
+}
+
+query OSMboxPost2_RH_TCBList_ECBList_P2 {
+    fixes absGlobal: AbsGlobal;
+    fixes pevent: address;
+    fixes msg: addrval;
+    fixes absGlobal2: AbsGlobal;
+    assumes indom(pevent, absGlobal.ecbMap);
+    assumes absGlobal2 == OSMboxPostAbs2(absGlobal, pevent, msg);
+    assumes RH_TCBList_ECBList_P2(absGlobal);
+    shows RH_TCBList_ECBList_P2(absGlobal2)
+    proof { seq_auto }
+}
+
+query OSMboxPost2_RLH_ECBData_P {
+    fixes global: Global;
+    fixes absGlobal: AbsGlobal;
+    fixes global2: Global;
+    fixes absGlobal2: AbsGlobal;
+    fixes pevent: address;
+    fixes msg: addrval;
+    assumes indom(pevent, global.events);
+    assumes get(pevent, global.events).OSEventGrp == 0;
+    assumes get(pevent, global.events).OSEventType == OS_EVENT_TYPE_MBOX;
+    assumes global2 == OSMboxPost(global, pevent, msg);
+    assumes absGlobal2 == OSMboxPostAbs2(absGlobal, pevent, msg);
+    assumes RLH_ECBData_P(get(pevent, global.events), get(pevent, absGlobal.ecbMap));
+    shows RLH_ECBData_P(get(pevent, global2.events), get(pevent, absGlobal2.ecbMap))
+    proof { seq_auto }
+}
+
+/*
+ * Helper function: removing an element from the circular queue.
+ * This is used in both QAccept and QPend.
+ */
+function QRemoveElement(OS_Q q1) -> Prod<OS_Q, addrval> {
+    pair(OS_Q{{
+            OSQIn: q1.OSQIn,
+            OSQOut: if (q1.OSQOut + 1 == |q1.OSQData|) {
+                0
+            } else {
+                q1.OSQOut + 1
+            },
+            OSQEntries: q1.OSQEntries - 1,
+            OSQData: q1.OSQData
+         }},
+         q1.OSQData[q1.OSQOut]
+    )
+}
+
+/*
+ * As a sanity check, we prove QRemoveElement satisfies the right properties.
+ */
+query QRemoveElement_MatchLHMsgList {
+    fixes q1: OS_Q;
+    fixes q2: OS_Q;
+    fixes msgl: Seq<addrval>;
+    fixes ret: Prod<OS_Q, addrval>;
+    assumes q1.OSQEntries > 0;
+    assumes MatchLHMsgList(q1, msgl);
+    assumes ret == QRemoveElement(q1);
+    shows MatchLHMsgList(ret.fst, seq_remove(0, msgl)) && ret.snd == msgl[0]
+    proof { seq_auto }
+}
+
+function OSQAccept(Global global, address pevent) -> Prod<Global, addrval> {
+    let q = get(pevent, global.events).OSQueue.val in
+        if (q.OSQEntries > 0) {
+            let ret = QRemoveElement(q) in
+            let global2 = global{|events[pevent].OSQueue := some(ret.fst)|} in
+                pair(global2, ret.snd)
+            end
+            end
+        } else {
+            pair(global, Vnull)
+        }
+    end
+}
+
+function OSQAcceptAbs(AbsGlobal absGlobal, address pevent) -> Prod<AbsGlobal, addrval> {
+    switch (get(pevent, absGlobal.ecbMap)) {
+        case AbsECB{{edata: absmsgq(msgl, qsize), wset: wset}}:
+            if (|msgl| == 0) {
+                pair(absGlobal, Vnull)
+            } else {
+                let absGlobal2 = absGlobal{|ecbMap[pevent] :=
+                    AbsECB{{edata: absmsgq(seq_remove(0, msgl), qsize), wset: wset}}|} in
+                    pair(absGlobal2, msgl[0])
+                end
+            };
+        default:
+            pair(absGlobal, Vnull);
+    }
+}
+
+query OSQAccept_RH_ECB_P {
+    fixes absGlobal: AbsGlobal;
+    fixes pevent: address;
+    fixes absGlobal2: AbsGlobal;
+    fixes msg: addrval;
+    assumes indom(pevent, absGlobal.ecbMap);
+    assumes pair(absGlobal2, msg) == OSQAcceptAbs(absGlobal, pevent);
+    assumes RH_ECB_P_All(absGlobal);
+    shows RH_ECB_P_All(absGlobal2)
+    proof { seq_auto }
+}
+
+query OSQAccept_RH_TCBList_ECBList_P1 {
+    fixes absGlobal: AbsGlobal;
+    fixes pevent: address;
+    fixes absGlobal2: AbsGlobal;
+    fixes msg: addrval;
+    assumes indom(pevent, absGlobal.ecbMap);
+    assumes pair(absGlobal2, msg) == OSQAcceptAbs(absGlobal, pevent);
+    assumes RH_CurTask_Ready(absGlobal);
+    assumes RH_TCBList_ECBList_P1(absGlobal);
+    shows RH_TCBList_ECBList_P1(absGlobal2)
+    proof { seq_auto }
+}
+
+query OSQAccept_RH_TCBList_ECBList_P2 {
+    fixes absGlobal: AbsGlobal;
+    fixes pevent: address;
+    fixes absGlobal2: AbsGlobal;
+    fixes msg: addrval;
+    assumes indom(pevent, absGlobal.ecbMap);
+    assumes pair(absGlobal2, msg) == OSQAcceptAbs(absGlobal, pevent);
+    assumes RH_CurTask_Ready(absGlobal);
+    assumes RH_TCBList_ECBList_P2(absGlobal);
+    shows RH_TCBList_ECBList_P2(absGlobal2)
+    proof { seq_auto }
+}
+
+query OSQAccept_RLH_ECBData_P {
+    fixes global: Global;
+    fixes absGlobal: AbsGlobal;
+    fixes global2: Global;
+    fixes absGlobal2: AbsGlobal;
+    fixes pevent: address;
+    fixes msg: addrval;
+    fixes absMsg: addrval;
+    assumes indom(pevent, global.events);
+    assumes get(pevent, global.events).OSEventType == OS_EVENT_TYPE_Q;
+    assumes pair(global2, msg) == OSQAccept(global, pevent);
+    assumes pair(absGlobal2, absMsg) == OSQAcceptAbs(absGlobal, pevent);
+    assumes RLH_ECBData_P(get(pevent, global.events), get(pevent, absGlobal.ecbMap));
+    shows RLH_ECBData_P(get(pevent, global2.events), get(pevent, absGlobal2.ecbMap)) &&
+          msg == absMsg
+    proof { seq_auto }
+}
+
+/*
+ * First part of OSQPend (before OSSched).
+ *
+ * Assume pevent is in global.events and the event type is OS_EVENT_TYPE_Q.
+ */
+function OSQPend1(Global global, address pevent, int16u timeout) -> Global {
+    let q = get(pevent, global.events).OSQueue.val in
+        if (q.OSQEntries > 0) {
+            let ret = QRemoveElement(q) in
+            let global2 = global{|events[pevent].OSQueue := some(ret.fst)|} in
+                global2{|OSTCBPrioTbl[global.OSPrioCur].OSTCBMsg := ret.snd|}
+            end
+            end
+        } else {
+            let global2 = global{|OSTCBPrioTbl[global.OSPrioCur].OSTCBStat :=
+                                get(global.OSPrioCur, global.OSTCBPrioTbl).OSTCBStat | OS_STAT_Q|} in
+            let global3 = global2{|OSTCBPrioTbl[global.OSPrioCur].OSTCBDly := timeout|} in
+                OS_EventTaskWait(global3, pevent)
+            end
+            end
+        }
+    end
+}
+
+function OSQPend2(Global global, address pevent) -> Global {
+    if (get(global.OSPrioCur, global.OSTCBPrioTbl).OSTCBMsg == Vnull) {
+        OS_EventTO(global, pevent)
+    } else {
+        let global2 = global{|OSTCBPrioTbl[global.OSPrioCur].OSTCBMsg := Vnull|} in
+        let global3 = global2{|OSTCBPrioTbl[global.OSPrioCur].OSTCBStat := OS_STAT_RDY|} in
+            global3{|OSTCBPrioTbl[global.OSPrioCur].OSTCBEventPtr := Vnull|}
+        end
+        end
+    }
+}
+
+/*
+ * Abstract version of OSQPend1.
+ *
+ * Assume pevent is in absGlobal.ecbMap.
+ */
+function OSQPendAbs1(AbsGlobal absGlobal, address pevent, int16u timeout) -> AbsGlobal {
+    switch (get(pevent, absGlobal.ecbMap)) {
+        case AbsECB{{edata: absmsgq(msgl, qsize), wset: wset}}:
+            if (|msgl| == 0) {
+                let absGlobal2 = absGlobal{|ecbMap[pevent] :=
+                    AbsECB{{edata: absmsgq(msgl, qsize),
+                            wset: seq_cons(absGlobal.curTask, get(pevent, absGlobal.ecbMap).wset)}}|} in
+                    absGlobal2{|tcbMap[absGlobal.curTask].stat := wait(os_stat_q(pevent), timeout)|}
+                end
+            } else {
+                let absGlobal2 = absGlobal{|ecbMap[pevent].edata := absmsgq(seq_remove(0, msgl), qsize)|} in
+                    absGlobal2{|tcbMap[absGlobal.curTask].msg := msgl[0]|}
+                end
+            };
+        default:
+            absGlobal;
+    }
+}
+
+query OSQPend1_RH_ECB_P {
+    fixes absGlobal: AbsGlobal;
+    fixes pevent: address;
+    fixes timeout: int16u;
+    fixes absGlobal2: AbsGlobal;
+    assumes indom(pevent, absGlobal.ecbMap);
+    assumes absGlobal2 == OSQPendAbs1(absGlobal, pevent, timeout);
+    assumes RH_ECB_P_All(absGlobal);
+    shows RH_ECB_P_All(absGlobal2)
+    proof { seq_auto }
+}
+
+query OSQPend1_RH_TCBList_ECBList_P1 {
+    fixes absGlobal: AbsGlobal;
+    fixes pevent: address;
+    fixes timeout: int16u;
+    fixes absGlobal2: AbsGlobal;
+    assumes indom(pevent, absGlobal.ecbMap);
+    assumes absGlobal2 == OSQPendAbs1(absGlobal, pevent, timeout);
+    assumes RH_CurTask_Ready(absGlobal);
+    assumes RH_TCBList_ECBList_P1(absGlobal);
+    shows RH_TCBList_ECBList_P1(absGlobal2)
+    proof { seq_auto }
+}
+
+query OSQPend1_RH_TCBList_ECBList_P2 {
+    fixes absGlobal: AbsGlobal;
+    fixes pevent: address;
+    fixes timeout: int16u;
+    fixes absGlobal2: AbsGlobal;
+    assumes indom(pevent, absGlobal.ecbMap);
+    assumes absGlobal2 == OSQPendAbs1(absGlobal, pevent, timeout);
+    assumes RH_CurTask_Ready(absGlobal);
+    assumes RH_TCBList_ECBList_P2(absGlobal);
+    shows RH_TCBList_ECBList_P2(absGlobal2)
+    proof { seq_auto }
+}
+
+query OSQPend1_RLH_ECBData_P {
+    fixes global: Global;
+    fixes absGlobal: AbsGlobal;
+    fixes global2: Global;
+    fixes absGlobal2: AbsGlobal;
+    fixes timeout: int16u;
+    fixes pevent: address;
+    assumes indom(pevent, global.events);
+    assumes get(pevent, global.events).OSEventType == OS_EVENT_TYPE_Q;
+    assumes global2 == OSQPend1(global, pevent, timeout);
+    assumes absGlobal2 == OSQPendAbs1(absGlobal, pevent, timeout);
+    assumes RLH_ECBData_P(get(pevent, global.events), get(pevent, absGlobal.ecbMap));
+    shows RLH_ECBData_P(get(pevent, global2.events), get(pevent, absGlobal2.ecbMap))
+    proof { seq_auto }
+}
+
+/*
+ * Abstract version of OSQPend2.
+ */
+function OSQPendAbs2(AbsGlobal absGlobal, address pevent) -> AbsGlobal {
+    let absGlobal2 = absGlobal{|tcbMap[absGlobal.curTask].msg := Vnull|} in
+        absGlobal2{|tcbMap[absGlobal.curTask].stat := rdy|}
+    end
+}
+
+query OSQPend2_RH_ECB_P {
+    fixes absGlobal: AbsGlobal;
+    fixes pevent: address;
+    fixes absGlobal2: AbsGlobal;
+    assumes indom(pevent, absGlobal.ecbMap);
+    assumes absGlobal2 == OSQPendAbs2(absGlobal, pevent);
+    assumes RH_ECB_P_All(absGlobal);
+    shows RH_ECB_P_All(absGlobal2)
+    proof { seq_auto }
+}
+
+query OSQPend2_RH_TCBList_ECBList_P1 {
+    fixes absGlobal: AbsGlobal;
+    fixes pevent: address;
+    fixes absGlobal2: AbsGlobal;
+    assumes indom(pevent, absGlobal.ecbMap);
+    assumes absGlobal2 == OSQPendAbs2(absGlobal, pevent);
+    assumes RH_CurTask_Ready(absGlobal);
+    assumes RH_TCBList_ECBList_P1(absGlobal);
+    shows RH_TCBList_ECBList_P1(absGlobal2)
+    proof { seq_auto }
+}
+
+query OSQPend2_RH_TCBList_ECBList_P2 {
+    fixes absGlobal: AbsGlobal;
+    fixes pevent: address;
+    fixes absGlobal2: AbsGlobal;
+    assumes indom(pevent, absGlobal.ecbMap);
+    assumes absGlobal2 == OSQPendAbs2(absGlobal, pevent);
+    assumes RH_CurTask_Ready(absGlobal);
+    assumes RH_TCBList_ECBList_P2(absGlobal);
+    shows RH_TCBList_ECBList_P2(absGlobal2)
+    proof { seq_auto }
+}
+
+query OSQPend2_RLH_ECBData_P {
+    fixes global: Global;
+    fixes absGlobal: AbsGlobal;
+    fixes global2: Global;
+    fixes absGlobal2: AbsGlobal;
+    fixes pevent: address;
+    assumes indom(pevent, global.events);
+    assumes get(pevent, global.events).OSEventType == OS_EVENT_TYPE_Q;
+    assumes global2 == OSQPend2(global, pevent);
+    assumes absGlobal2 == OSQPendAbs2(absGlobal, pevent);
+    assumes RLH_ECBData_P(get(pevent, global.events), get(pevent, absGlobal.ecbMap));
+    shows RLH_ECBData_P(get(pevent, global2.events), get(pevent, absGlobal2.ecbMap))
+    proof { seq_auto }
+}
+
+/*
+ * Helper function: adding an element to the circular queue.
+ * This is used in QPost.
+ */
+function QAddElement(OS_Q q1, addrval msg) -> OS_Q {
+    let qin = q1.OSQIn in
+    let qsize = |q1.OSQData| in
+        OS_Q{{
+            OSQIn: if (qin + 1 == qsize) {
+                0
+            } else {
+                qin + 1
+            },
+            OSQOut: q1.OSQOut,
+            OSQEntries: q1.OSQEntries + 1,
+            OSQData: seq_update(qin, msg, q1.OSQData)
+        }}
+    end
+    end
+}
+
+/*
+ * As a sanity check, we prove QAddElement satisfies the right properties.
+ */
+query QAddElement_MatchLHMsgList {
+    fixes q1: OS_Q;
+    fixes q2: OS_Q;
+    fixes msgl: Seq<addrval>;
+    fixes msg: addrval;
+    fixes qsize: int;
+    assumes qsize == |q1.OSQData|;
+    assumes q1.OSQEntries < qsize;
+    assumes MatchLHMsgList(q1, msgl);
+    assumes q2 == QAddElement(q1, msg);
+    shows MatchLHMsgList(q2, msgl ++ seq_repeat(msg, 1))
+    proof { seq_auto }
+}
+
+/*
+ * Part of OSQPost before OS_Sched.
+ */
+function OSQPost(Global global, address pevent, addrval msg) -> Global {
+    let event = get(pevent, global.events) in
+        if (event.OSEventGrp != 0) {
+            OS_EventTaskRdy(global, pevent, msg, OS_STAT_Q)
+        } else {
+            let q1 = event.OSQueue.val in
+            let qsize = |q1.OSQData| in
+                if (q1.OSQEntries >= qsize) {
+                    global
+                } else {
+                    let q2 = QAddElement(q1, msg) in
+                        global{|events[pevent].OSQueue := some(q2)|}
+                    end
+                }
+            end
+            end
+        }
+    end
+}
+
+/*
+ * Abstract version of OSQPost.
+ */
+function OSQPostAbsHelper(AbsGlobal absGlobal, address pevent, int highPrioId, addrval msg) -> AbsGlobal {
+    let highPrio = get(pevent, absGlobal.ecbMap).wset[highPrioId] in
+    let absGlobal2 = absGlobal{|ecbMap[pevent].wset :=
+            seq_remove(highPrioId, get(pevent, absGlobal.ecbMap).wset)|} in
+    let absGlobal3 = absGlobal2{|tcbMap[highPrio].stat := rdy|} in
+        absGlobal3{|tcbMap[highPrio].msg := msg|}
+    end
+    end
+    end
+}
+
+predicate OSQPostAbs1(AbsGlobal absGlobal, AbsGlobal absGlobal2, address pevent, addrval msg) {
+    exists (int highPrioId) {
+        highPrioIdInWset(get(pevent, absGlobal.ecbMap).wset, highPrioId) &&
+        absGlobal2 == OSQPostAbsHelper(absGlobal, pevent, highPrioId, msg)
+    }
+}
+
+query OSQPost1_RH_ECB_P {
+    fixes absGlobal: AbsGlobal;
+    fixes pevent: address;
+    fixes absGlobal2: AbsGlobal;
+    fixes msg: addrval;
+    assumes indom(pevent, absGlobal.ecbMap);
+    assumes |get(pevent, absGlobal.ecbMap).wset| > 0;
+    assumes OSQPostAbs1(absGlobal, absGlobal2, pevent, msg);
+    assumes RH_ECB_P_All(absGlobal);
+    shows RH_ECB_P_All(absGlobal2)
+    proof { seq_auto }
+}
+
+query OSQPost1_RH_TCBList_ECBList_P1 {
+    fixes absGlobal: AbsGlobal;
+    fixes pevent: address;
+    fixes absGlobal2: AbsGlobal;
+    fixes msg: addrval;
+    assumes indom(pevent, absGlobal.ecbMap);
+    assumes |get(pevent, absGlobal.ecbMap).wset| > 0;
+    assumes OSQPostAbs1(absGlobal, absGlobal2, pevent, msg);
+    assumes event_wset_unique(absGlobal);
+    assumes RH_TCBList_ECBList_P1(absGlobal);
+    shows RH_TCBList_ECBList_P1(absGlobal2)
+    proof { seq_auto }
+}
+
+query OSQPost1_RH_TCBList_ECBList_P2 {
+    fixes absGlobal: AbsGlobal;
+    fixes pevent: address;
+    fixes absGlobal2: AbsGlobal;
+    fixes msg: addrval;
+    assumes indom(pevent, absGlobal.ecbMap);
+    assumes |get(pevent, absGlobal.ecbMap).wset| > 0;
+    assumes OSQPostAbs1(absGlobal, absGlobal2, pevent, msg);
+    assumes RH_TCBList_ECBList_P2(absGlobal);
+    shows RH_TCBList_ECBList_P2(absGlobal2)
+    proof { seq_auto }
+}
+
+query OSQPost1_RLH_ECBData_P {
+    fixes global: Global;
+    fixes absGlobal: AbsGlobal;
+    fixes global2: Global;
+    fixes absGlobal2: AbsGlobal;
+    fixes pevent: address;
+    fixes msg: addrval;
+    assumes indom(pevent, global.events);
+    assumes get(pevent, global.events).OSEventGrp != 0;
+    assumes get(pevent, global.events).OSEventType == OS_EVENT_TYPE_MBOX;
+    assumes global2 == OSMboxPost(global, pevent, msg);
+    assumes OSQPostAbs1(absGlobal, absGlobal2, pevent, msg);
+    assumes RLH_ECBData_P(get(pevent, global.events), get(pevent, absGlobal.ecbMap));
+    shows RLH_ECBData_P(get(pevent, global2.events), get(pevent, absGlobal2.ecbMap))
+    proof { seq_auto }
+}
+
+function OSQPostAbs2(AbsGlobal absGlobal, address pevent, addrval msg) -> AbsGlobal {
+    switch (get(pevent, absGlobal.ecbMap)) {
+        case AbsECB{{edata: absmsgq(msgl, qsize), wset: wset}}:
+            if (|msgl| >= qsize) {
+                absGlobal
+            } else {
+                absGlobal{|ecbMap[pevent].edata := absmsgq(msgl ++ seq_repeat(msg, 1), qsize)|}
+            };
+        default: absGlobal;
+    }
+}
+
+query OSQPost2_RH_ECB_P {
+    fixes absGlobal: AbsGlobal;
+    fixes pevent: address;
+    fixes msg: addrval;
+    fixes absGlobal2: AbsGlobal;
+    assumes indom(pevent, absGlobal.ecbMap);
+    assumes |get(pevent, absGlobal.ecbMap).wset| == 0;
+    assumes absGlobal2 == OSQPostAbs2(absGlobal, pevent, msg);
+    assumes RH_ECB_P_All(absGlobal);
+    shows RH_ECB_P_All(absGlobal2)
+    proof { seq_auto }
+}
+
+query OSQPost2_RH_TCBList_ECBList_P1 {
+    fixes absGlobal: AbsGlobal;
+    fixes pevent: address;
+    fixes msg: addrval;
+    fixes absGlobal2: AbsGlobal;
+    assumes indom(pevent, absGlobal.ecbMap);
+    assumes absGlobal2 == OSQPostAbs2(absGlobal, pevent, msg);
+    assumes RH_TCBList_ECBList_P1(absGlobal);
+    shows RH_TCBList_ECBList_P1(absGlobal2)
+    proof { seq_auto }
+}
+
+query OSQPost2_RH_TCBList_ECBList_P2 {
+    fixes absGlobal: AbsGlobal;
+    fixes pevent: address;
+    fixes msg: addrval;
+    fixes absGlobal2: AbsGlobal;
+    assumes indom(pevent, absGlobal.ecbMap);
+    assumes absGlobal2 == OSQPostAbs2(absGlobal, pevent, msg);
+    assumes RH_TCBList_ECBList_P2(absGlobal);
+    shows RH_TCBList_ECBList_P2(absGlobal2)
+    proof { seq_auto }
+}
+
+query OSQPost2_RLH_ECBData_P {
+    fixes global: Global;
+    fixes absGlobal: AbsGlobal;
+    fixes global2: Global;
+    fixes absGlobal2: AbsGlobal;
+    fixes pevent: address;
+    fixes msg: addrval;
+    assumes indom(pevent, global.events);
+    assumes get(pevent, global.events).OSEventGrp == 0;
+    assumes get(pevent, global.events).OSEventType == OS_EVENT_TYPE_Q;
+    assumes global2 == OSQPost(global, pevent, msg);
+    assumes absGlobal2 == OSQPostAbs2(absGlobal, pevent, msg);
+    assumes RLH_ECBData_P(get(pevent, global.events), get(pevent, absGlobal.ecbMap));
+    shows RLH_ECBData_P(get(pevent, global2.events), get(pevent, absGlobal2.ecbMap))
+    proof { seq_auto }
 }

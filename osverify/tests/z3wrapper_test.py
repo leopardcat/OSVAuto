@@ -4,251 +4,54 @@ import unittest
 
 from osverify import os_theory
 from osverify import os_parser
-from osverify import os_z3wrapper
-from osverify import os_tactics
+from osverify.os_z3wrapper import solve, UnsatResult, ModelResult
+from osverify.os_proofstate import ProofState
+
 
 def initTheory() -> os_theory.OSTheory:
     return os_parser.load_theory("basic", verbose=False)
 
+def seqTheory() -> os_theory.OSTheory:
+    return os_parser.load_theory("seq", verbose=False)
 
 class Z3WrapperTest(unittest.TestCase):
-    def testStructEqual(self):
-        thy = initTheory()
+    def solve_query(self, thy: os_theory.OSTheory, state: ProofState):
+        """Solve the given query, return whether the query can be proved."""
+        res = solve(thy, state)
+        if isinstance(res, UnsatResult):
+            return True
+        elif isinstance(res, ModelResult):
+            return False
+        else:
+            raise NotImplementedError
 
-        struct = """
-        struct A { int32u x; int32u y; }
-        """
-        thy.add_struct(os_parser.parse_struct(thy, struct))
+    def testSeq(self):
+        thy = seqTheory()
 
-        query = os_parser.parse_query(thy, """
-        query testStructEqual {
-            fixes a: A;
-            shows a == A {{ x: a.x, y: a.y }}
-        }
-        """)
-        self.assertTrue(os_z3wrapper.solve_query(thy, query))
+        # Running example in "A Solver for Arrays with Concatenation"
+        os_parser.parse_theory_items(
+            thy, """
+            axiomfunc P: int32u -> bool
+            """
+        )
 
-    def testStructVal(self):
-        thy = initTheory()
-
-        struct = """
-        struct A { int32u x; int32u y; }
-        """
-        thy.add_struct(os_parser.parse_struct(thy, struct))
-
-        query = """
-        query testStructVal {
-            fixes a: A;
-            assumes a == A {{ x: 1, y: 2}};
-            shows a.x == 1
-        }
-        """
-        query = os_parser.parse_query(thy, query)
-        self.assertTrue(os_z3wrapper.solve_query(thy, query))
-
-    def testStructUpdate(self):
-        thy = initTheory()
-
-        struct = """
-        struct A { int32u x; int32u y; }
-        """
-        thy.add_struct(os_parser.parse_struct(thy, struct))
-
-        query = """
-        query testStructUpdate {
-            fixes a: A;
-            fixes b: A;
-            assumes b == a{ x := 1 };
-            shows b.x == 1 && b.y == a.y
+        state = """
+        state {
+            fixes a: Seq<int32u>;
+            fixes b: Seq<int32u>;
+            fixes k: int;
+            assumes k + |a| >= 0 &&
+                    k + |a| < |a| + |b| ->
+                    k + |a| >= |a| &&
+                    k + |a| < |a| + |b| ->
+                    P(b[k + |a| - |a|]);
+            assumes k >= 0 && k < |b| + |a|;
+            assumes k >= 0 && k < |b|;
+            shows P(b[k])
         }
         """
-        query = os_parser.parse_query(thy, query)
-        self.assertTrue(os_z3wrapper.solve_query(thy, query))
-
-    def testStructUpdate2(self):
-        thy = initTheory()
-
-        datatype = """
-        datatype A = f(int32u x) | g(int32u y)
-        """
-        thy.add_datatype(os_parser.parse_datatype(thy, datatype))
-
-        struct = """
-        struct B { A u; A v; }
-        """
-        thy.add_struct(os_parser.parse_struct(thy, struct))
-
-        query = """
-        query testStructUpdate {
-            fixes a: B;
-            fixes b: B;
-            assumes b == a{ u := f(1) };
-            shows b.u.x == 1
-        }
-        """
-        query = os_parser.parse_query(thy, query)
-        self.assertTrue(os_z3wrapper.solve_query(thy, query))
-
-    def testDatatypeEqual(self):
-        thy = initTheory()
-
-        datatype = """
-        datatype A = f(int32u x) | g(int32u y)
-        """
-        thy.add_datatype(os_parser.parse_datatype(thy, datatype))
-
-        query = """
-        query testDatatypeEqual {
-            fixes a: A;
-            fixes b: A;
-            assumes switch (a) {
-                case f(u):
-                    switch (b) {
-                        case f(v): u == v;
-                        default: false;
-                    };
-                default: false;
-            };
-            shows a == b
-        }
-        """
-        query = os_parser.parse_query(thy, query)
-        self.assertTrue(os_z3wrapper.solve_query(thy, query))
-
-    def testDatatypeEqual2(self):
-        thy = initTheory()
-
-        datatype = """
-        datatype A = f(int32u x) | g(int32u y)
-        """
-        thy.add_datatype(os_parser.parse_datatype(thy, datatype))
-
-        # TODO: remove the default case for a
-        query = """
-        query testDatatypeEqual2 {
-            fixes a: A;
-            fixes b: A;
-            assumes a == b;
-            shows switch (a) {
-                case f(u):
-                    switch (b) {
-                        case f(v): u == v;
-                        default: false;
-                    };
-                case g(u):
-                     switch (b) {
-                        case g(v): u == v;
-                        default: false;
-                     };
-                default: false;
-            }
-        }
-        """
-        query = os_parser.parse_query(thy, query)
-        self.assertTrue(os_z3wrapper.solve_query(thy, query))
-
-    def testDatatypeEqual3(self):
-        thy = initTheory()
-
-        datatype = """
-        datatype A = f(int32u x) | g(int32u y)
-        """
-        thy.add_datatype(os_parser.parse_datatype(thy, datatype))
-
-        query = """
-        query testDatatypeEqual3 {
-            fixes a: A;
-            assumes a == f(1);
-            shows a.x == 1
-        }
-        """
-        query = os_parser.parse_query(thy, query)
-        self.assertTrue(os_z3wrapper.solve_query(thy, query))
-
-    def testDatatypeEqual4(self):
-        thy = initTheory()
-
-        query = """
-        query testDatatypeEqual4 {
-            fixes xs: List<int32u>;
-            assumes xs == cons(1, cons(2, nil));
-            shows xs.ele == 1 && xs.rest.ele == 2 && xs.rest.rest == nil
-        }
-        """
-        query = os_parser.parse_query(thy, query)
-        self.assertTrue(os_z3wrapper.solve_query(thy, query))
-
-    def testDatatypeEqual5(self):
-        thy = initTheory()
-
-        query = """
-        query testDatatypeEqual4 {
-            fixes xs: List<int32u>;
-            fixes ys: List<int32u>;
-            fixes zs: List<int32u>;
-            assumes xs == cons(1, ys);
-            assumes ys == cons(2, zs);
-            shows xs.ele == 1 && xs.rest.ele == 2 && xs.rest.rest == zs
-        }
-        """
-        query = os_parser.parse_query(thy, query)
-        self.assertTrue(os_z3wrapper.solve_query(thy, query))
-        
-    def testDatatypeEqual6(self):
-        thy = initTheory()
-
-        datatype = """
-        datatype A = f(int32u x) | g(int32u y)
-        """
-        thy.add_datatype(os_parser.parse_datatype(thy, datatype))
-
-        axiom_func = """
-        axiomfunc h: A -> A
-        """
-        thy.add_axiom_func(os_parser.parse_axiomfunc(thy, axiom_func))
-
-        query = """
-        query testDatatypeEqual6 {
-            fixes a: A;
-            fixes b: A;
-            assumes switch (a) {
-                case f(u):
-                    switch (b) {
-                        case f(v): u == v;
-                        default: false;
-                    };
-                default: false;
-            };
-            shows h(a) == h(b)
-            proof {
-                assert (H: a == b) { auto };;
-                auto
-            }
-        }
-        """
-        query = os_parser.parse_query(thy, query)
-        os_tactics.check_proof(thy, query)
-
-    def testDatatypeEqual7(self):
-        thy = initTheory()
-
-        datatype = """
-        datatype A = f(int32u x) | g(int32u y)
-        """
-        thy.add_datatype(os_parser.parse_datatype(thy, datatype))
-
-        query = """
-        query testDatatypeEqual7 {
-            fixes a: A;
-            shows switch (a) {
-                case f(u): a == f(a.x);
-                case g(v): a == g(a.y);
-                default: false;
-            }
-        }
-        """
-        query = os_parser.parse_query(thy, query)
-        self.assertTrue(os_z3wrapper.solve_query(thy, query))
+        state = os_parser.parse_proof_state(thy, state)
+        self.assertTrue(self.solve_query(thy, state))
 
 
 if __name__ == "__main__":

@@ -1,19 +1,28 @@
 """Parser for OS verification"""
 
-from lark import Lark, Transformer, v_args, exceptions, Token
-
-from typing import Iterable, List, Set, Tuple, Optional, Union
+import os
+from lark import Lark, Transformer, v_args, Token
+from typing import Optional, Union
+import time
 
 from osverify import os_struct
 from osverify import os_term
 from osverify import os_query
 from osverify import os_theory
 from osverify import os_tactics
-from osverify.os_theory import OSTheory, OSContext
-from osverify.os_fixp import OSFunction
+from osverify import os_fixp
+from osverify import os_seplogic
+from osverify import os_seq
+from osverify.os_theory import OSTheory
 from osverify.os_struct import OSType
-from osverify.os_term import OSTerm, OSOp
+from osverify.os_term import OSTerm, OSOp, VarContext, GenField
 from osverify.os_tactics import Tactic
+from osverify import auto_tactics
+from osverify.os_seplogic import SepAssertion
+from osverify import os_z3wrapper
+from osverify import os_model
+from osverify.graph import ClassificationGraph
+
 
 os_verify_grammar = r"""
     // Primitive types
@@ -22,10 +31,14 @@ os_verify_grammar = r"""
             | "int8u" -> int8u_type
             | "int16u" -> int16u_type
             | "int32u" -> int32u_type
+            | "int64u" -> int64u_type
+            | "int8" -> int8_type
+            | "int16" -> int16_type
+            | "int32" -> int32_type
+            | "int64" -> int64_type
 
     // General types
     ?os_atom_type: os_prim_type
-            | os_atom_type "[]" -> os_arr_type
             | CNAME -> os_hlevel_type
             | "?" CNAME -> os_sch_type
             | CNAME "<" os_type ("," os_type)* ">" -> os_hlevel_param_type
@@ -34,16 +47,19 @@ os_verify_grammar = r"""
     ?os_type: (os_atom_type "->")+ os_atom_type -> os_fun_type
             | os_atom_type
 
+    // Annotation on fields
+    ?annotation: "binary" -> binary_annotation
+            | "octal" -> octal_annotation
+            | "hex" -> hex_annotation
+
     // Field of a structure
-    ?os_field: os_type CNAME
+    ?os_field: os_type CNAME ("[" annotation ("," annotation)* "]")?
 
     // Structure definition
     ?os_struct_def: "struct" CNAME "{" (os_field ";")* "}"
 
-    // Constant definitions
-    ?os_const_def: CNAME "=" INT
-
-    ?os_consts: "consts" "{" (os_const_def ";")* "}"
+    // Single constant definition
+    ?os_const: "const" os_type CNAME "=" os_term ";"
 
     // Auxiliary for structure update
     ?field_update: CNAME ":=" os_term
@@ -57,7 +73,7 @@ os_verify_grammar = r"""
     ?struct_name: CNAME -> struct_name
 
     // Auxiliary for let expression
-    ?let_assign: CNAME "=" os_term
+    ?let_assign: CNAME "=" os_typed_term
 
     // Patterns in case expression
     ?case_struct_field: CNAME ":" case_pat
@@ -76,19 +92,27 @@ os_verify_grammar = r"""
 
     ?os_params: os_localv ("," os_localv)* -> os_params
 
+    // Generalized field updates
+    ?gen_field: CNAME -> atom_gen_field
+            | gen_field "[" os_term "]" -> index_gen_field
+            | gen_field "." CNAME -> field_get_gen_field
+
     ?os_atom: CNAME -> vname
             | "?" CNAME -> sch_vname
-            | "?" -> unknown
-            | os_atom "::" os_type -> atom_with_type
+            | os_atom "@" os_type -> atom_with_type
             | INT -> number
             | ori_struct "{" field_update ("," field_update)* "}" -> struct_update
+            | ori_struct "{|" gen_field ":=" os_term "|}" -> struct_update_gen
             | struct_name "{{" struct_field ("," struct_field)* "}}" -> struct_val
             | CNAME "(" os_term ("," os_term)* ")" -> function_app
-            | "[" "]" -> empty_list
-            | "[" os_term ("," os_term)* "]" -> literal_list
             | "(" os_term ")"                                // Parenthesis
-            | os_atom "[" os_term "]" -> array_index         // Array indexing
-            | os_atom "[" os_term ":=" os_term "]" -> array_store  // Array store
+            | "|" os_atom "|"  -> seq_length                 // Sequence length
+            | os_atom "[" os_term "]" -> seq_index           // Sequence indexing
+            | os_atom "++" os_atom -> seq_append             // Sequence append
+            | os_atom "::" os_atom -> seq_cons               // Sequence connect
+            | os_atom "[" os_term ":" os_term "]" -> seq_slice // Sequence slice
+            | "[" "]" -> seq_literal_empty                   // Sequence literal
+            | "[" os_term ("," os_term)* "]" -> seq_literal  // Empty sequence literal
             | os_atom "." CNAME -> member_get                // Structure field
             | "let" let_assign "in" os_term "end" -> let_in  // Let-in expression
             | "switch" "(" os_term ")" "{" (case_branch ";")* "}" -> switch_case
@@ -102,10 +126,14 @@ os_verify_grammar = r"""
             | "~" negation -> bvneg
             | "-" negation -> uminus
             | os_atom                               // priority 90
-
-    ?times: times "*" negation -> times
-            | times "/" negation -> divides
-            | negation                              // priority 87
+         
+    ?power:  power "**" negation -> power              
+            | negation                            // priority 89
+    
+    ?times: times "*" power -> times
+            | times "/" power -> divides         
+            | times "%" power ->  modulo
+            | power                             // priority 87
 
     ?plus: plus "+" times -> plus
             | plus "-" times -> minus
@@ -144,6 +172,11 @@ os_verify_grammar = r"""
     ?os_term: impl
 
     ?os_typed_term: os_term -> os_typed_term
+
+    // Definitions for separation logic
+    ?sep_atom: CNAME "(" os_typed_term ("," os_typed_term)* ")"   -> sep_fun
+
+    ?sep: sep_atom (";" sep_atom)*                 -> sep_conj
    
     // Declaration of functions
     ?os_axiom_func: "axiomfunc" function_name ":" os_type -> os_axiom_func
@@ -167,22 +200,27 @@ os_verify_grammar = r"""
     ?apply_param: CNAME -> apply_param_basic
             | CNAME "," "[" CNAME ("," CNAME)* "]" -> apply_param_facts
 
-    ?thm_spec: CNAME -> thm_spec
-            | CNAME "<" os_type ("," os_type)* ">" -> thm_spec_type
-
     ?tactic_atom: "skip" -> skip_tactic
-            | "auto" ("(" thm_spec ("," thm_spec)* ")")? -> auto_tactic
+            | "admit" -> admit_tactic
+            | "auto" -> auto_tactic
+            | "seq_auto" -> seq_auto_tactic
             | "cases" "(" os_typed_term ")" "{" (tactic_branch ";")* "}" -> cases_tactic
             | "induction" "(" induction_param ")" "{" (tactic_branch ";")* "}" -> induction_tactic
+            | "induction_func" "(" CNAME ")" -> induction_func_tactic
             | "assumption" -> assumption_tactic
-            | "simplify" -> simplify_tactic
+            | "rewrite" CNAME -> rewrite_tactic
+            | "let" "(" CNAME "=" os_typed_term ")" -> define_var_tactic
             | "exists" "(" os_typed_term ("," os_typed_term)* ")" -> exists_tactic
+            | "specialize" CNAME "(" os_typed_term ("," os_typed_term)* ")" -> specialize_tactic
             | "skolemize" "(" CNAME "," "[" os_localv ("," os_localv)* "]" ")" -> skolemize_tactic
+            | "intros" "[" os_localv ("," os_localv)* "]" -> intros_tactic
             | "assert" "(" CNAME ":" os_typed_term ")" "{" tactic "}" -> assert_tactic
             | "change" "(" os_typed_term ")" "{" tactic "}" -> change_tactic
             | "split_conj" "(" CNAME "," "[" CNAME ("," CNAME)* "]" ")" -> split_conj_tactic
+            | "split_goal" -> split_goal_tactic
             | "match_show" "(" CNAME ")" -> match_show_tactic
             | "apply_theorem" "(" apply_param ")" -> apply_theorem_tactic
+            | "apply" "(" CNAME ")" -> apply_tactic
 
     ?tactic: tactic_atom
             | tactic_atom ";;" tactic -> then_tactic
@@ -195,18 +233,20 @@ os_verify_grammar = r"""
 
     ?assumes: "assumes" os_typed_term -> assumes
             | "assumes" CNAME ":" os_typed_term -> assumes_named
-            | "assumes" "[trigger]" os_typed_term -> assumes_trig
-            | "assumes" CNAME "[trigger]" ":" os_typed_term -> assumes_named_trig
+            | "assumes" "[trigger]" os_typed_term -> assumes_trigger
+            | "assumes" CNAME "[trigger]" ":" os_typed_term -> assumes_named_trigger
 
     ?shows: "shows" os_typed_term -> shows
-            | "shows" "[trigger]" os_typed_term -> shows_trig
+            | "shows" "[trigger]" os_typed_term -> shows_trigger
             | "shows" os_typed_term "proof" "{" tactic "}" -> shows_proof
-            | "shows" "[trigger]" os_typed_term "proof" "{" tactic "}" -> shows_trig_proof
+            | "shows" "[trigger]" os_typed_term "proof" "{" tactic "}" -> shows_trigger_proof
 
     ?query_decl: type_param | fixes | assumes | shows
 
     // Query definition
     ?os_query_def: "query" CNAME "{" query_decl (";" query_decl)* "}"
+
+    ?os_axiom_def: "axiom" CNAME "{" query_decl (";" query_decl)* "}" 
 
     // Type alias definition
     ?os_typedef: "typedef" CNAME "=" os_type ";"
@@ -218,7 +258,7 @@ os_verify_grammar = r"""
     ?datatype_name: CNAME -> datatype_name
             | CNAME "<" CNAME ("," CNAME)* ">" -> datatype_name_params
 
-    ?os_datatype: "datatype" datatype_name "=" datatype_branch ("|" datatype_branch)*
+    ?os_datatype: "enum" datatype_name "=" datatype_branch ("|" datatype_branch)*
             | "axiomtype" datatype_name -> os_axiomtype
 
     ?os_attrib_decl: "add_attrib" CNAME "for" CNAME ("," CNAME)* -> os_add_attrib
@@ -228,10 +268,11 @@ os_verify_grammar = r"""
 
     ?os_theory_item: os_imports -> os_theory_item
             | os_struct_def -> os_theory_item
-            | os_consts -> os_theory_item
+            | os_const -> os_theory_item
             | os_function -> os_theory_item
             | os_predicate -> os_theory_item
             | os_query_def -> os_theory_item
+            | os_axiom_def -> os_theory_item
             | os_typedef -> os_theory_item
             | os_datatype -> os_theory_item
             | os_axiom_func -> os_theory_item
@@ -262,22 +303,58 @@ os_verify_grammar = r"""
 @v_args(inline=True)
 class OSVerifyTransformer(Transformer):
     def __init__(self, thy: OSTheory, *,
-                 ctxt: Optional[OSContext] = None,
-                 visited: Set[str] = set(),
+                 ctxt: Optional[VarContext] = None,
+                 visited: Optional[set[str]] = None,
                  check_proof: Union[bool, str] = False,
+                 print_time=False,
                  verbose=False):
         self.thy = thy
         if ctxt is None:
-            self.ctxt = OSContext(thy)
+            self.ctxt = VarContext()
         else:
+            assert isinstance(ctxt, VarContext), \
+                "input context to parser should be VarContext"
             self.ctxt = ctxt
+
+        # Temporary label for recursive datatype
+        self.datatype_decl: Optional[str] = None
+
+        # Default structure
+        self.default_struct: list[str] = list()
+
+        # List of declared tactic variables
+        self.tactic_vars: set[str] = set()
+
+        if visited is None:
+            visited = set()
         self.visited = visited
         self.check_proof = check_proof
+
+        # Print time for each query
+        self.print_time = print_time
+
+        # Extra printing statements
         self.verbose = verbose
 
     def print_verbose(self, s: str):
         if self.verbose:
             print(s)
+
+    def lookup_field(self, field_name: str) -> Optional[OSType]:
+        """Return type of a field from default structure."""
+        if not self.default_struct:
+            return None  # no structure is set
+
+        if self.default_struct[-1] not in self.thy.structs:
+            raise AssertionError(
+                "lookup_field: default structure %s not found in theory" \
+                    % self.default_struct[-1])
+
+        struct = self.thy.structs[self.default_struct[-1]]
+        if field_name not in struct.field_map:
+            return None  # field not found
+
+        return struct.field_map[field_name]
 
     def bool_type(self) -> OSType:
         return os_struct.OSPrimType("bool")
@@ -294,8 +371,20 @@ class OSVerifyTransformer(Transformer):
     def int32u_type(self) -> OSType:
         return os_struct.OSPrimType("int32u")
     
-    def os_arr_type(self, type: OSType) -> OSType:
-        return os_struct.OSArrayType(type)
+    def int64u_type(self) -> OSType:
+        return os_struct.OSPrimType("int64u")
+
+    def int8_type(self) -> OSType:
+        return os_struct.OSPrimType("int8")
+
+    def int16_type(self) -> OSType:
+        return os_struct.OSPrimType("int16")
+
+    def int32_type(self) -> OSType:
+        return os_struct.OSPrimType("int32")
+
+    def int64_type(self) -> OSType:
+        return os_struct.OSPrimType("int64")
     
     def os_hlevel_type(self, name: Token) -> OSType:
         name = str(name)
@@ -303,7 +392,7 @@ class OSVerifyTransformer(Transformer):
             return os_struct.OSHLevelType(name)
         elif name in self.thy.structs:
             return os_struct.OSStructType(name)
-        elif name == self.ctxt.datatype_decl:
+        elif name == self.datatype_decl:
             return os_struct.OSHLevelType(name)
         elif name in self.ctxt.type_params:
             return os_struct.OSBoundType(name)
@@ -314,7 +403,7 @@ class OSVerifyTransformer(Transformer):
         name = str(name)
         if self.thy.is_defined_type(name):
             return os_struct.OSHLevelType(name, *params)
-        elif name == self.ctxt.datatype_decl:
+        elif name == self.datatype_decl:
             return os_struct.OSHLevelType(name, *params)
         elif name in self.thy.axiom_types:
             return os_struct.OSHLevelType(name, *params)
@@ -327,17 +416,25 @@ class OSVerifyTransformer(Transformer):
     def os_fun_type(self, *tys: OSType) -> OSType:
         return os_struct.OSFunctionType(*tys)
 
-    def os_field(self, type: OSType, field_name: Token) -> os_struct.StructField:
-        return os_struct.StructField(os_theory.expand_type(self.thy, type), str(field_name))
+    def binary_annotation(self) -> str:
+        return "binary"
+
+    def octal_annotation(self) -> str:
+        return "octal"
+
+    def hex_annotation(self) -> str:
+        return "hex"
+
+    def os_field(self, type: OSType, field_name: Token, *annotations: str) -> os_struct.StructField:
+        return os_struct.StructField(
+            os_theory.expand_type(self.thy, type), str(field_name), annotations)
 
     def os_struct_def(self, struct_name: Token, *fields) -> os_struct.Struct:
         return os_struct.Struct(str(struct_name), fields)
 
-    def os_const_def(self, const_name: Token, val: Token) -> os_struct.ConstDef:
-        return os_struct.ConstDef(str(const_name), int(val))
-
-    def os_consts(self, *const_defs) -> os_struct.ConstDefList:
-        return os_struct.ConstDefList(const_defs)
+    def os_const(self, type: OSType, const_name: Token, body: OSTerm) -> os_fixp.OSFunction:
+        os_theory.check_type(self.thy, body, self.ctxt, type)
+        return os_fixp.OSFunction(str(const_name), [], [], type, body)
 
     def vname(self, name: Token) -> OSTerm:
         name = str(name)
@@ -345,21 +442,23 @@ class OSVerifyTransformer(Transformer):
             return os_term.OSNumber(True)
         elif name == 'false':
             return os_term.OSNumber(False)
-        elif name in self.thy.const_val:
-            # Constant
-            return os_term.OSConst(name)
+        elif name == 'default':
+            # Default value for type
+            return os_term.OSFun(name, type=None)
         elif name in self.thy.constr_types:
             # Constructor
             return os_term.OSFun(name)
-        elif name in self.ctxt.var_decls:
+        elif self.ctxt.contains_var(name):
             # Declared variable
             return os_term.OSVar(name)
-        elif name in self.ctxt.bound_vars:
-            # Bound variable
-            return os_term.OSVar(name)
+        elif name in self.thy.fixps:
+            # Declared function
+            fixp = self.thy.fixps[name]
+            assert len(fixp.params) == 0, "vname: function %s has arguments" % name
+            return os_term.OSFun(fixp.name, type=fixp.ret_type)
         else:
             # Field of default structure
-            ty = self.ctxt.lookup_field(name)
+            ty = self.lookup_field(name)
             if ty is None:
                 raise AssertionError("Variable %s not found" % name)
             else:
@@ -367,9 +466,6 @@ class OSVerifyTransformer(Transformer):
     
     def sch_vname(self, name: Token) -> OSTerm:
         return os_term.OSVar('?' + str(name))
-
-    def unknown(self) -> OSTerm:
-        return os_term.OSUnknown()
 
     def atom_with_type(self, expr: OSTerm, ty: OSType) -> OSTerm:
         expr.type = os_theory.expand_type(self.thy, ty)
@@ -381,18 +477,19 @@ class OSVerifyTransformer(Transformer):
     def field_update(self, field_name: Token, expr: OSTerm) -> OSTerm:
         field_name = str(field_name)
         # Check field with the given name exists
-        if self.ctxt.lookup_field(field_name) is None:
+        if self.lookup_field(field_name) is None:
             raise AssertionError("field %s is not found" % field_name)
         return os_term.FieldUpdate(field_name, expr)
 
     def ori_struct_name(self, name: Token) -> OSTerm:
         name = str(name)
-        if name not in self.ctxt.var_decls:
-            raise AssertionError("struct_update: variable %s not found" % name)
-        var_type = self.ctxt.var_decls[name]
+        if not self.ctxt.contains_var(name):
+            raise AssertionError(f"struct_update: variable {name} not found")
+        var_type = self.ctxt.get_var_type(name)
         if not isinstance(var_type, os_struct.OSStructType):
-            raise AssertionError("struct_update: original term %s is not of structure type" % name)
-        self.ctxt.default_struct.append(var_type.name)
+            raise AssertionError(
+                f"struct_update: original term {name} is not of structure type, found {var_type}")
+        self.default_struct.append(var_type.name)
         return os_term.OSVar(name)
 
     def ori_struct_expr(self, expr: OSTerm) -> OSTerm:
@@ -400,19 +497,25 @@ class OSVerifyTransformer(Transformer):
         ty = expr.type
         if not isinstance(ty, os_struct.OSStructType):
             raise AssertionError("struct_update: original term %s is not of structure type" % ty.name)
-        self.ctxt.default_struct.append(ty.name)
+        self.default_struct.append(ty.name)
         return expr
     
     def struct_update(self, ori_struct: OSTerm, *updates) -> OSTerm:
         # Clear default structure after parsing an update
-        del self.ctxt.default_struct[-1]
+        del self.default_struct[-1]
 
         return os_term.OSStructUpdate(ori_struct, updates)
     
-    def struct_field(self, field_name: Token, expr: OSTerm) -> Tuple[str, OSTerm]:
+    def struct_update_gen(self, ori_struct: OSTerm, gen_field: GenField, expr: OSTerm) -> OSTerm:
+        # Clear default structure after parsing an update
+        del self.default_struct[-1]
+
+        return os_term.OSStructUpdateGen(ori_struct, gen_field, expr)
+
+    def struct_field(self, field_name: Token, expr: OSTerm) -> tuple[str, OSTerm]:
         field_name = str(field_name)
         # Check field with the given name exists
-        if self.ctxt.lookup_field(field_name) is None:
+        if self.lookup_field(field_name) is None:
             raise AssertionError("field %s is not found" % field_name)
         return field_name, expr
 
@@ -421,12 +524,12 @@ class OSVerifyTransformer(Transformer):
         name = str(name)
         if name not in self.thy.structs:
             raise AssertionError("struct_val: structure %s not found" % name)
-        self.ctxt.default_struct.append(name)
+        self.default_struct.append(name)
         return name
 
-    def struct_val(self, name: str, *fields: Tuple[str, OSTerm]) -> OSTerm:
+    def struct_val(self, name: str, *fields: tuple[str, OSTerm]) -> OSTerm:
         # Clear default structure after parsing a value
-        del self.ctxt.default_struct[-1]
+        del self.default_struct[-1]
 
         # Check all fields are filled
         struct = self.thy.structs[name]
@@ -440,28 +543,34 @@ class OSVerifyTransformer(Transformer):
         """if function is an axiomatic function, find var type from var_decl"""
         return os_term.OSFun(str(func_name), *args)
 
-    def empty_list(self) -> OSTerm:
-        return os_term.OSFun("nil")
+    def seq_length(self, l: OSTerm) -> OSTerm:
+        return os_term.OSFun("seq_length", l)
 
-    def literal_list(self, *ts: OSTerm) -> OSTerm:
-        res = os_term.OSFun("nil")
-        for t in reversed(list(ts)):
-            res = os_term.OSFun("cons", t, res)
-        return res
+    def seq_index(self, expr: OSTerm, index: OSTerm) -> OSTerm:
+        return os_term.OSFun("seq_index", index, expr)
 
-    def array_index(self, arr: OSTerm, idx: OSTerm) -> OSTerm:
-        return os_term.OSFun("nth", arr, idx)
-    
-    def array_store(self, arr: OSTerm, idx: OSTerm, t: OSTerm) -> OSTerm:
-        return os_term.OSFun("Store", arr, idx, t)
+    def seq_append(self, l1: OSTerm, l2: OSTerm) -> OSTerm:
+        return os_term.OSFun("seq_append", l1, l2)
+
+    def seq_cons(self, v: OSTerm, l: OSTerm) -> OSTerm:
+        return os_term.OSFun("seq_cons", v, l)
+
+    def seq_slice(self, l: OSTerm, i: OSTerm, j : OSTerm) -> OSTerm:
+        return os_term.OSFun("seq_slice", i, j, l)
+
+    def seq_literal_empty(self) -> OSTerm:
+        return os_term.seq_literal()
+
+    def seq_literal(self, *ts: OSTerm) -> OSTerm:
+        return os_term.seq_literal(*ts)
 
     def member_get(self, expr: OSTerm, field_name: Token) -> OSTerm:
         return os_term.FieldGet(expr, str(field_name))
 
-    def case_struct_field(self, field_name: Token, pat: OSTerm) -> Tuple[str, OSTerm]:
+    def case_struct_field(self, field_name: Token, pat: OSTerm) -> tuple[str, OSTerm]:
         field_name = str(field_name)
         # Check field with the given name exists
-        if self.ctxt.lookup_field(field_name) is None:
+        if self.lookup_field(field_name) is None:
             raise AssertionError("field %s is not found" % field_name)
         return field_name, pat
 
@@ -477,10 +586,7 @@ class OSVerifyTransformer(Transformer):
             # Constructor
             return os_term.OSFun(name)
         else:
-            # Bound variable
-            if name in self.ctxt.bound_vars or name in self.ctxt.var_decls:
-                raise AssertionError("case_pat_var: variable %s already defined" % name)
-            self.ctxt.bound_vars.append(name)
+            self.ctxt.add_var_decl(name)
             return os_term.OSVar(name)
     
     def case_pat_number(self, val: Token) -> OSTerm:
@@ -495,27 +601,22 @@ class OSVerifyTransformer(Transformer):
     def case_pat_struct_empty(self, struct_name: str) -> OSTerm:
         return os_term.OSStructVal(struct_name, tuple())
 
-    def case_pat_struct(self, struct_name: str, *vals: Tuple[str, OSTerm]) -> OSTerm:
+    def case_pat_struct(self, struct_name: str, *vals: tuple[str, OSTerm]) -> OSTerm:
         # Clear default structure after parsing a value
-        del self.ctxt.default_struct[-1]
+        del self.default_struct[-1]
 
         return os_term.OSStructVal(struct_name, vals)
 
     def case_branch(self, pattern: OSTerm, expr: OSTerm) -> os_term.OSSwitchBranch:
         _, bound_vars = pattern.get_vars()
         for var in bound_vars:
-            self.ctxt.bound_vars.remove(var.name)
+            self.ctxt.del_var_decl(var.name)
         return os_term.OSSwitchBranchCase(pattern, expr)
 
     def default_branch(self, expr: os_term.OSTerm) -> os_term.OSSwitchBranch:
         return os_term.OSSwitchBranchDefault(expr)
 
     def switch_case(self, var_name: str, *branches: os_term.OSSwitchBranch) -> OSTerm:
-        if len(branches) > 0 and isinstance(branches[0], os_term.OSSwitchBranchCase) and \
-            isinstance(branches[0].pattern, os_term.OSStructVal):
-            assert len(branches) == 1 or \
-                (len(branches) == 2 and isinstance(branches[1], os_term.OSSwitchBranchDefault)), \
-                "switch_case: if pattern is structure, there can be no other branches."
         return os_term.OSSwitch(var_name, branches)
 
     def ite(self, cond: OSTerm, if_branch: OSTerm, else_branch: OSTerm) -> OSTerm:
@@ -523,33 +624,31 @@ class OSVerifyTransformer(Transformer):
 
     def let_assign(self, var_name: Token, expr: OSTerm):
         var_name = str(var_name)
-        if var_name in self.ctxt.var_decls or var_name in self.ctxt.bound_vars:
-            raise AssertionError("let: variable %s already defined" % var_name)
-        self.ctxt.bound_vars.append(var_name)
+        self.ctxt.add_var_decl(var_name, expr.type)
         return var_name, expr
 
-    def let_in(self, let_assign, rhs: OSTerm) -> OSTerm:
-        var_name, expr = let_assign
-        res = os_term.OSLet(var_name, expr, rhs)
-        self.ctxt.bound_vars.remove(var_name)
+    def let_in(self, let_assign, expr: OSTerm) -> OSTerm:
+        var_name, rhs = let_assign
+        res = os_term.OSLet(var_name, rhs, expr)
+        self.ctxt.del_var_decl(var_name)
         return res
     
-    def forall(self, params: Tuple[os_term.OSVar], body: OSTerm) -> OSTerm:
+    def forall(self, params: tuple[os_term.OSVar], body: OSTerm) -> OSTerm:
         for param in params:
-            del self.ctxt.var_decls[param.name]
+            self.ctxt.del_var_decl(param.name)
         return os_term.OSQuant("forall", params, body)
     
-    def exists(self, params: Tuple[os_term.OSVar], body: OSTerm) -> OSTerm:
+    def exists(self, params: tuple[os_term.OSVar], body: OSTerm) -> OSTerm:
         for param in params:
-            del self.ctxt.var_decls[param.name]
+            self.ctxt.del_var_decl(param.name)
         return os_term.OSQuant("exists", params, body)
 
     def forall_in(self, param: os_term.OSVar, collection: OSTerm, body: OSTerm) -> OSTerm:
-        del self.ctxt.var_decls[param.name]
+        self.ctxt.del_var_decl(param.name)
         return os_term.OSQuantIn("forall", param, collection, body)
 
     def exists_in(self, param: os_term.OSVar, collection: OSTerm, body: OSTerm) -> OSTerm:
-        del self.ctxt.var_decls[param.name]
+        self.ctxt.del_var_decl(param.name)
         return os_term.OSQuantIn("exists", param, collection, body)
 
     def bneg(self, arg: OSTerm) -> OSTerm:
@@ -560,13 +659,19 @@ class OSVerifyTransformer(Transformer):
     
     def uminus(self, arg: OSTerm) -> OSTerm:
         return OSOp("-", arg)
-    
+
+    def power(self, lhs: OSTerm, rhs: OSTerm) -> OSTerm:
+        return OSOp("**", lhs, rhs)
+
     def times(self, lhs: OSTerm, rhs: OSTerm) -> OSTerm:
         return OSOp("*", lhs, rhs)
-    
+
     def divides(self, lhs: OSTerm, rhs: OSTerm) -> OSTerm:
         return OSOp("/", lhs, rhs)
-    
+
+    def modulo(self, lhs: OSTerm, rhs: OSTerm) -> OSTerm:
+        return OSOp("%", lhs, rhs)
+
     def plus(self, lhs: OSTerm, rhs: OSTerm) -> OSTerm:
         return OSOp("+", lhs, rhs)
     
@@ -617,64 +722,86 @@ class OSVerifyTransformer(Transformer):
         return OSOp("->", lhs, rhs)
     
     def os_typed_term(self, t: OSTerm) -> OSTerm:
-        os_theory.check_type(self.thy, t, self.ctxt.var_decls)
+        os_theory.check_type(self.thy, t, self.ctxt)
         t.assert_type_checked()
         return t
 
+    def sep_fun(self, func_name: Token, *args: OSTerm) -> SepAssertion:
+        return os_seplogic.SepFun(str(func_name), *args)
+
+    def sep_conj(self, *parts: SepAssertion) -> os_seplogic.SepConj:
+        return os_seplogic.SepConj(*parts)
+
     def os_localv(self, ty: OSType, name: Token) -> os_term.OSVar:
         name = str(name)
-        if name in self.ctxt.var_decls:
-            raise AssertionError("add_var_decl: variable %s already defined" % name)
-        else:
-            ty = os_theory.expand_type(self.thy, ty)
-            self.ctxt.add_var_decl(name, ty)
-            return os_term.OSVar(name, type=ty)
+        ty = os_theory.expand_type(self.thy, ty)
+        self.ctxt.add_var_decl(name, ty)
+        return os_term.OSVar(name, type=ty)
         
-    def os_params(self, *vars) -> Tuple[os_term.OSVar]:
+    def os_params(self, *vars) -> tuple[os_term.OSVar]:
         return tuple(vars)
     
-    def os_axiom_func(self, func_name: Tuple[str, Tuple[str]],
+    def atom_gen_field(self, field_name: Token) -> GenField:
+        field_name = str(field_name)
+        # Check field with the given name exists
+        if self.lookup_field(field_name) is None:
+            raise AssertionError("field %s is not found" % field_name)
+        return os_term.AtomGenField(field_name)
+
+    def index_gen_field(self, base: GenField, index: OSTerm):
+        return os_term.IndexGenField(base, index)
+
+    def field_get_gen_field(self, base: GenField, name: Token):
+        return os_term.FieldGetGenField(base, str(name))
+
+    def os_axiom_func(self, func_name: tuple[str, tuple[str]],
                       func_ty: OSType) -> os_struct.AxiomDef:
         func_name, ty_params = func_name
         func_ty = os_theory.expand_type(self.thy, func_ty)
-        return os_struct.AxiomDef(func_name, ty_params, func_ty)
+        res = os_struct.AxiomDef(func_name, ty_params, func_ty)
+        # Remove type parameters from context
+        for param in ty_params:
+            self.ctxt.type_params.remove(param)
+        return res
     
-    def function_name(self, name: Token) -> Tuple[str, Tuple[str]]:
+    def function_name(self, name: Token) -> tuple[str, tuple[str]]:
         return str(name), tuple()
     
-    def function_name_params(self, name: Token, *params: Token) -> Tuple[str, Tuple[str]]:
+    def function_name_params(self, name: Token, *params: Token) -> tuple[str, tuple[str]]:
         type_params = tuple(str(param) for param in params)
         # Add type parameters to context
         self.ctxt.type_params.extend(type_params)
         return str(name), type_params
     
-    def os_function(self, function_name: Tuple[str, Tuple[str]], params: Tuple[os_term.OSVar],
-                    ret_type: OSType, body: OSTerm) -> OSFunction:
+    def os_function(self, function_name: tuple[str, tuple[str]],
+                    params: tuple[os_term.OSVar],
+                    ret_type: OSType, body: OSTerm) -> os_fixp.OSFunction:
         name, type_params = function_name
         ret_type = os_theory.expand_type(self.thy, ret_type)
 
         # Check body using return type, while temporarily adding type of function.
-        var_ctxt = dict(self.ctxt.var_decls)
         if len(params) == 0:
-            var_ctxt[name] = ret_type
+            self.ctxt.add_var_decl(name, ret_type)
         else:
             arg_types = list()
             for param in params:
                 arg_types.append(param.type)
-                var_ctxt[param.name] = param.type
-            var_ctxt[name] = os_struct.OSFunctionType(*(arg_types + [ret_type]))
-        os_theory.check_type(self.thy, body, var_ctxt, ret_type)
+                self.ctxt.add_var_decl(param.name, param.type)
+            self.ctxt.add_var_decl(name, os_struct.OSFunctionType(*(arg_types + [ret_type])))
+        os_theory.check_type(self.thy, body, self.ctxt, ret_type)
         body.assert_type_checked()
 
-        res = OSFunction(name, type_params, params, ret_type, body)
+        res = os_fixp.OSFunction(name, type_params, params, ret_type, body)
+        self.ctxt.del_var_decl(name)
         for param in params:
-            del self.ctxt.var_decls[param.name]
+            self.ctxt.del_var_decl(param.name)
         for type_param in type_params:
             self.ctxt.type_params.remove(type_param)
         return res
 
-    def os_predicate(self, function_name: Tuple[str, Tuple[str]], params: Tuple[os_term.OSVar],
-                     pred: OSTerm) -> OSFunction:
+    def os_predicate(self, function_name: tuple[str, tuple[str]],
+                     params: tuple[os_term.OSVar],
+                     pred: OSTerm) -> os_fixp.OSFunction:
         return self.os_function(function_name, params, os_struct.Bool, pred)
 
     def tactic_branch_case(self, constr_name: Token,
@@ -714,36 +841,54 @@ class OSVerifyTransformer(Transformer):
     def skip_tactic(self) -> Tactic:
         return os_tactics.Skip()
     
-    def thm_spec(self, thm_name: Token) -> os_theory.TheoremSpec:
-        return os_theory.TheoremSpec(str(thm_name), tuple())
-    
-    def thm_spec_type(self, thm_name: Token, *tys: OSType) -> os_theory.TheoremSpec:
-        tys = [os_theory.expand_type(self.thy, ty) for ty in tys]
-        return os_theory.TheoremSpec(str(thm_name), tys)
+    def admit_tactic(self) -> Tactic:
+        return os_tactics.Admit()
 
-    def auto_tactic(self, *thm_spec: Tuple[os_theory.TheoremSpec]) -> Tactic:
-        return os_tactics.Auto(thm_spec=thm_spec)
+    def auto_tactic(self) -> Tactic:
+        return os_tactics.Auto()
     
+    def seq_auto_tactic(self) -> Tactic:
+        return os_seq.SeqAuto()
+
     def cases_tactic(self, expr: OSTerm, *cases: os_tactics.TacticBranch) -> Tactic:
         return os_tactics.Cases(expr, cases=cases)
 
     def induction_tactic(self, param: os_tactics.InductionParam, *cases: os_tactics.TacticBranch) -> Tactic:
         return os_tactics.Induction(param, cases=cases)
 
+    def induction_func_tactic(self, func_name: Token) -> Tactic:
+        return os_tactics.InductionFunc(str(func_name))
+
     def assumption_tactic(self) -> Tactic:
         return os_tactics.Assumption()
 
-    def simplify_tactic(self) -> Tactic:
-        return os_tactics.Simplify()
-    
+    def rewrite_tactic(self, th_name: Token) -> Tactic:
+        return os_tactics.Rewrite(str(th_name))
+
+    def define_var_tactic(self, var_name: Token, expr: OSTerm) -> Tactic:
+        var_name = str(var_name)
+        if self.ctxt.contains_var(var_name):
+            raise AssertionError(f"let: variable {var_name} already used")
+        self.ctxt.add_var_decl(var_name, expr.type)
+        self.tactic_vars.add(var_name)
+        return os_tactics.DefineVar(var_name, expr)
+
     def exists_tactic(self, *exprs: OSTerm) -> Tactic:
         return os_tactics.Exists(exprs)
+
+    def specialize_tactic(self, name: Token, *exprs: OSTerm) -> Tactic:
+        return os_tactics.Specialize(str(name), exprs)
 
     def skolemize_tactic(self, name: Token, *new_vars: os_term.OSVar) -> Tactic:
         name = str(name)
         for new_var in new_vars:
-            self.ctxt.tactic_vars.add(new_var.name)
+            self.tactic_vars.add(new_var.name)
         return os_tactics.Skolemize(name, new_vars)
+    
+    def intros_tactic(self, *new_vars: os_term.OSVar) -> Tactic:
+        for new_var in new_vars:
+            self.tactic_vars.add(new_var.name)
+        return os_tactics.Intros([var.name for var in new_vars])
     
     def assert_tactic(self, name: Token, expr: OSTerm, tactic: Tactic) -> Tactic:
         return os_tactics.Assert(str(name), expr, tactic)
@@ -756,12 +901,25 @@ class OSVerifyTransformer(Transformer):
         new_names = [str(new_name) for new_name in new_names]
         return os_tactics.SplitConj(name, new_names)
 
+    def split_goal_tactic(self) -> Tactic:
+        return os_tactics.SplitGoal()
+
     def match_show_tactic(self, name: Token) -> Tactic:
         name = str(name)
         return os_tactics.MatchShow(name)
     
     def apply_theorem_tactic(self, param: os_tactics.ApplyParam) -> Tactic:
         return os_tactics.ApplyTheorem(param)
+
+    def apply_tactic(self, name: Token) -> Tactic:
+        name = str(name)
+        if hasattr(os_seq, name):
+            return getattr(os_seq, name)()
+        if hasattr(os_tactics, name):
+            return getattr(os_tactics, name)()
+        if hasattr(auto_tactics, name):
+            return getattr(auto_tactics, name)()
+        raise AssertionError("Name %s not found")
 
     def then_tactic(self, tactic1: Tactic, tactic2: Tactic) -> Tactic:
         return os_tactics.Then(tactic1, tactic2)
@@ -782,40 +940,46 @@ class OSVerifyTransformer(Transformer):
         return os_term.OSVar(str(var_name), type=type)
 
     def assumes(self, expr: OSTerm) -> os_query.Assumes:
-        return os_query.Assumes(expr)
+        return os_query.Assumes(expr, generation=0, conds=tuple(),
+                                meta=os_query.Meta(initial_form=expr))
     
     def assumes_named(self, name: Token, expr: OSTerm) -> os_query.Assumes:
-        return os_query.Assumes(expr, name=str(name))
+        return os_query.Assumes(expr, generation=0, conds=tuple(), name=str(name),
+                                meta=os_query.Meta(initial_form=expr))
 
-    def assumes_trig(self, expr: OSTerm) -> os_query.Assumes:
-        return os_query.Assumes(expr, is_trigger=True)
+    def assumes_trigger(self, expr: OSTerm) -> os_query.Assumes:
+        return os_query.Assumes(expr, generation=0, conds=tuple(),
+                                meta=os_query.Meta(initial_form=expr, is_trigger=True))
     
-    def assumes_named_trig(self, name: Token, expr: OSTerm) -> os_query.Assumes:
-        return os_query.Assumes(expr, name=str(name), is_trigger=True)
+    def assumes_named_trigger(self, name: Token, expr: OSTerm) -> os_query.Assumes:
+        return os_query.Assumes(expr, generation=0, conds=tuple(), name=str(name),
+                                meta=os_query.Meta(initial_form=expr, is_trigger=True))
 
     def shows(self, expr: OSTerm) -> os_query.Shows:
-        return os_query.Shows(expr, proof=os_tactics.Skip())
+        return os_query.Shows(expr, proof=os_tactics.Skip(), meta=os_query.Meta(initial_form=expr))
     
-    def shows_trig(self, expr: OSTerm) -> os_query.Shows:
-        return os_query.Shows(expr, proof=os_tactics.Skip(), is_trigger=True)
+    def shows_trigger(self, expr: OSTerm) -> os_query.Shows:
+        return os_query.Shows(expr, proof=os_tactics.Skip(),
+                              meta=os_query.Meta(initial_form=expr, is_trigger=True))
 
     def shows_proof(self, expr: OSTerm, proof: Tactic) -> os_query.Shows:
-        for tactic_var in self.ctxt.tactic_vars:
-            del self.ctxt.var_decls[tactic_var]
-        self.ctxt.tactic_vars.clear()
-        return os_query.Shows(expr, proof=proof)
+        for tactic_var in self.tactic_vars:
+            self.ctxt.del_var_decl(tactic_var)
+        self.tactic_vars.clear()
+        return os_query.Shows(expr, proof=proof, meta=os_query.Meta(initial_form=expr))
 
-    def shows_trig_proof(self, expr: OSTerm, proof: Tactic) -> os_query.Shows:
-        for tactic_var in self.ctxt.tactic_vars:
-            del self.ctxt.var_decls[tactic_var]
-        self.ctxt.tactic_vars.clear()
-        return os_query.Shows(expr, is_trigger=True, proof=proof)
+    def shows_trigger_proof(self, expr: OSTerm, proof: Tactic) -> os_query.Shows:
+        for tactic_var in self.tactic_vars:
+            self.ctxt.del_var_decl(tactic_var)
+        self.tactic_vars.clear()
+        return os_query.Shows(expr, proof=proof,
+                              meta=os_query.Meta(initial_form=expr, is_trigger=True))
 
-    def os_query_def(self, query_name, *query_decls) -> os_query.Query:
-        type_params: List[str] = []
-        fixes: List[os_term.OSVar] = []
-        assumes: List[os_query.Assumes] = []
-        shows: List[os_query.Shows] = []
+    def mk_os_query(self, query_name, query_decls, *, is_axiom) -> os_query.Query:
+        type_params: list[str] = []
+        fixes: list[os_term.OSVar] = []
+        assumes: list[os_query.Assumes] = []
+        shows: list[os_query.Shows] = []
         for decl in query_decls:
             if isinstance(decl, str):
                 type_params.append(decl)
@@ -826,11 +990,18 @@ class OSVerifyTransformer(Transformer):
             elif isinstance(decl, os_query.Shows):
                 shows.append(decl)
         for fix in fixes:
-            del self.ctxt.var_decls[fix.name]
+            self.ctxt.del_var_decl(fix.name)
         for type_param in type_params:
             self.ctxt.type_params.remove(type_param)
-        return os_query.Query(query_name, type_params, fixes, assumes, shows)
+        return os_query.Query(query_name, type_params, fixes, assumes, shows,
+                              is_axiom=is_axiom)
+
+    def os_query_def(self, query_name, *query_decls) -> os_query.Query:
+        return self.mk_os_query(query_name, query_decls, is_axiom=False)
     
+    def os_axiom_def(self, query_name, *query_decls) -> os_query.Query:
+        return self.mk_os_query(query_name, query_decls, is_axiom=True)
+
     def os_typedef(self, type_name: Token, type: OSType) -> os_struct.TypeDef:
         type = os_theory.expand_type(self.thy, type)
         return os_struct.TypeDef(str(type_name), type)
@@ -838,26 +1009,27 @@ class OSVerifyTransformer(Transformer):
     def datatype_branch_single(self, constr_name: Token) -> os_struct.DatatypeBranch:
         return os_struct.DatatypeBranch(str(constr_name))
 
-    def datatype_branch_param(self, constr_name: Token, params: Tuple[os_term.OSVar]) -> os_struct.DatatypeBranch:
+    def datatype_branch_param(self, constr_name: Token,
+                              params: tuple[os_term.OSVar]) -> os_struct.DatatypeBranch:
         res = os_struct.DatatypeBranch(
             str(constr_name), *((param.name, param.type) for param in params))
         for param in params:
-            del self.ctxt.var_decls[param.name]
+            self.ctxt.del_var_decl(param.name)
         return res
     
-    def datatype_name(self, name: Token) -> Tuple[str, Tuple[str]]:
-        self.ctxt.datatype_decl = str(name)
-        return self.ctxt.datatype_decl, tuple()
+    def datatype_name(self, name: Token) -> tuple[str, tuple[str]]:
+        self.datatype_decl = str(name)
+        return self.datatype_decl, tuple()
     
-    def datatype_name_params(self, name: Token, *params: Token) -> Tuple[str, Tuple[str]]:
+    def datatype_name_params(self, name: Token, *params: Token) -> tuple[str, tuple[str]]:
         name = str(name)
-        self.ctxt.datatype_decl = name
+        self.datatype_decl = name
         type_params = tuple(str(param) for param in params)
         # Add type parameters to context
         self.ctxt.type_params.extend(type_params)
-        return self.ctxt.datatype_decl, type_params
+        return self.datatype_decl, type_params
 
-    def os_datatype(self, datatype_name: Tuple[str, Tuple[str]], *branches) -> os_struct.Datatype:
+    def os_datatype(self, datatype_name: tuple[str, tuple[str]], *branches) -> os_struct.Datatype:
         name, params = datatype_name
         res = os_struct.Datatype(name, params, *branches)
         # Remove type parameters from context
@@ -865,7 +1037,7 @@ class OSVerifyTransformer(Transformer):
             self.ctxt.type_params.remove(param)
         return res
     
-    def os_axiomtype(self, datatype_name: Tuple[str, Tuple[str]]) -> os_struct.Datatype:
+    def os_axiomtype(self, datatype_name: tuple[str, tuple[str]]) -> os_struct.Datatype:
         name, params = datatype_name
         res = os_struct.AxiomType(name, params)
         for param in params:
@@ -879,10 +1051,10 @@ class OSVerifyTransformer(Transformer):
         return os_theory.OSAttribDecl("del", attrib_name, th_names)
 
     def os_proof_state(self, *query_decls) -> os_tactics.ProofState:
-        type_params: List[str] = []
-        fixes: List[os_term.OSVar] = []
-        assumes: List[os_query.Assumes] = []
-        shows: List[os_query.Shows] = []
+        type_params: list[str] = []
+        fixes: list[os_term.OSVar] = []
+        assumes: list[os_query.Assumes] = []
+        shows: list[os_query.Shows] = []
         for decl in query_decls:
             if isinstance(decl, str):
                 type_params.append(decl)
@@ -894,16 +1066,18 @@ class OSVerifyTransformer(Transformer):
                 shows.append(decl)
         assert len(shows) == 1, "os_proof_state: must have exactly one conclusion"
         for fix in fixes:
-            del self.ctxt.var_decls[fix.name]
+            self.ctxt.del_var_decl(fix.name)
         for type_param in type_params:
             self.ctxt.type_params.remove(type_param)
         return os_tactics.ProofState(
             type_params=type_params,
             fixes=fixes,
-            assumes=[(assume.name, assume.prop) for assume in assumes],
-            concl=shows[0].prop)
+            assumes=assumes,
+            concl=shows[0],
+            graph=None
+        )
 
-    def os_context(self, *query_decls) -> OSContext:
+    def os_context(self, *query_decls) -> VarContext:
         # Declaration of type and variable parameters are already added.
         return self.ctxt
     
@@ -933,11 +1107,7 @@ class OSVerifyTransformer(Transformer):
         elif isinstance(item, os_struct.Struct):
             self.print_verbose("add struct %s" % item.struct_name)
             self.thy.add_struct(item)
-        elif isinstance(item, os_struct.ConstDefList):
-            for const_def in item.const_defs:
-                self.print_verbose("add constant %s" % const_def.const_name)
-            self.thy.add_consts(item)
-        elif isinstance(item, OSFunction):
+        elif isinstance(item, os_fixp.OSFunction):
             self.print_verbose("add function %s" % item.name)
             self.thy.add_function(item)
         elif isinstance(item, os_struct.TypeDef):
@@ -953,10 +1123,34 @@ class OSVerifyTransformer(Transformer):
             self.print_verbose("add axiomdef %s" % item.func_name)
             self.thy.add_axiom_func(item)
         elif isinstance(item, os_query.Query):
-            self.print_verbose("add query %s" % item.query_name)
-            if (isinstance(self.check_proof, bool) and self.check_proof) or \
-               (isinstance(self.check_proof, str) and item.query_name == self.check_proof):
-                os_tactics.check_proof(self.thy, item)
+            if item.is_axiom:
+                self.print_verbose("add axiom %s" % item.query_name)
+            else:
+                self.print_verbose("add query %s" % item.query_name)
+                if (isinstance(self.check_proof, bool) and self.check_proof) or \
+                   (isinstance(self.check_proof, str) and item.query_name == self.check_proof):
+                    try:
+                        if self.print_time:
+                            start_time = time.time()
+                        os_tactics.check_proof(self.thy, item)
+                        if self.print_time:
+                            end_time = time.time()
+                            elapsed_time = end_time - start_time
+                            self.print_verbose(f"{elapsed_time:.2f} seconds")
+                    except os_z3wrapper.SMTException as e:
+                        # print("--- State ---")
+                        # print(e.state)
+                        # print("--- pprint map ---")
+                        # print(e.state.pprint_map())
+                        print("--- Original model ---")
+                        print(e.z3_model)
+                        model = os_model.convert_model_on_state(
+                            self.thy, e.state, e.z3_model, verbose=True, check_model=True)
+                        print("--- Converted model ---")
+                        print(model.pprint(self.thy))
+                        os_model.diagnose_query(self.thy, e.state, model)
+                        raise e
+
             self.thy.add_query(item)
         elif isinstance(item, os_theory.OSAttribDecl):
             if item.attrib_name not in self.thy.attribute_map:
@@ -965,13 +1159,13 @@ class OSVerifyTransformer(Transformer):
             if item.operation == "add":
                 for th_name in item.th_names:
                     if th_name in attrib:
-                        raise AssertionError("theorem %s already has attribute %s" % (
+                        raise AssertionError("add_attrib: theorem %s already has attribute %s" % (
                             th_name, item.attrib_name))
                     attrib.append(th_name)
             elif item.operation == "del":
                 for th_name in item.th_names:
                     if th_name not in attrib:
-                        raise AssertionError("theorem %s not in attribute %s" % (
+                        raise AssertionError("del_attrib: theorem %s not in attribute %s" % (
                             th_name, item.attrib_name))
                     attrib.remove(th_name)
             else:
@@ -979,20 +1173,20 @@ class OSVerifyTransformer(Transformer):
         else:
             raise AssertionError("unknown declaration type: %s" % type(item))
 
-def type_parser(thy: OSTheory, ctxt: OSContext):
+def type_parser(thy: OSTheory, ctxt: VarContext):
     return Lark(os_verify_grammar, start="os_type", parser="lalr",
                 transformer=OSVerifyTransformer(thy, ctxt=ctxt))
 
-def term_parser(thy: OSTheory, ctxt: OSContext):
+def term_parser(thy: OSTheory, ctxt: VarContext):
     return Lark(os_verify_grammar, start="os_typed_term", parser="lalr",
+                transformer=OSVerifyTransformer(thy, ctxt=ctxt))
+
+def sep_parser(thy: OSTheory, ctxt: VarContext):
+    return Lark(os_verify_grammar, start="sep", parser="lalr",
                 transformer=OSVerifyTransformer(thy, ctxt=ctxt))
 
 def struct_parser(thy: OSTheory):
     return Lark(os_verify_grammar, start="os_struct_def", parser="lalr",
-                transformer=OSVerifyTransformer(thy))
-
-def consts_parser(thy: OSTheory):
-    return Lark(os_verify_grammar, start="os_consts", parser="lalr",
                 transformer=OSVerifyTransformer(thy))
 
 def function_parser(thy: OSTheory):
@@ -1031,27 +1225,28 @@ def imports_parser(thy: OSTheory):
     return Lark(os_verify_grammar, start="os_imports", parser="lalr",
                 transformer=OSVerifyTransformer(thy))
 
-def theory_items_parser(thy: OSTheory, visited: Set[str], check_proof: bool, verbose: bool):
+def theory_items_parser(thy: OSTheory, visited: set[str], check_proof: bool,
+                        print_time: bool, verbose: bool):
     return Lark(os_verify_grammar, start="os_theory_items", parser="lalr",
                 transformer=OSVerifyTransformer(thy, visited=visited, check_proof=check_proof,
-                                                verbose=verbose))
+                                                print_time=print_time, verbose=verbose))
 
-def parse_type(thy: OSTheory, ctxt: OSContext, s: str) -> OSType:
+def parse_type(thy: OSTheory, ctxt: VarContext, s: str) -> OSType:
     return type_parser(thy, ctxt).parse(s)
 
-def parse_term(thy: OSTheory, ctxt: OSContext, s: str) -> OSTerm:
+def parse_term(thy: OSTheory, ctxt: VarContext, s: str) -> OSTerm:
     return term_parser(thy, ctxt).parse(s)
+
+def parse_sep(thy: OSTheory, ctxt: VarContext, s: str) -> os_seplogic.SepConj:
+    return sep_parser(thy, ctxt).parse(s)
 
 def parse_struct(thy: OSTheory, s: str) -> os_struct.Struct:
     return struct_parser(thy).parse(s)
 
-def parse_consts(thy: OSTheory, s: str) -> os_struct.ConstDefList:
-    return consts_parser(thy).parse(s)
-
-def parse_function(thy: OSTheory, s: str) -> OSFunction:
+def parse_function(thy: OSTheory, s: str) -> os_fixp.OSFunction:
     return function_parser(thy).parse(s)
 
-def parse_predicate(thy: OSTheory, s: str) -> OSFunction:
+def parse_predicate(thy: OSTheory, s: str) -> os_fixp.OSFunction:
     return predicate_parser(thy).parse(s)
 
 def parse_query(thy: OSTheory, s: str) -> os_query.Query:
@@ -1069,14 +1264,15 @@ def parse_datatype(thy: OSTheory, s: str) -> os_struct.Datatype:
 def parse_proof_state(thy: OSTheory, s: str) -> os_tactics.ProofState:
     return proof_state_parser(thy).parse(s)
 
-def parse_context(thy: OSTheory, s: str) -> OSContext:
+def parse_context(thy: OSTheory, s: str) -> VarContext:
     return context_parser(thy).parse(s)
 
 def parse_imports(thy: OSTheory, s: str) -> os_theory.OSImports:
     return imports_parser(thy).parse(s)
 
-def parse_theory_items(thy: OSTheory, s: str, visited: Set[str], *, check_proof: bool, verbose: bool):
-    return theory_items_parser(thy, visited, check_proof, verbose).parse(s)
+def parse_theory_items(thy: OSTheory, s: str, visited: set[str] = None, *,
+                       check_proof: bool = True, print_time: bool = False, verbose: bool = False):
+    return theory_items_parser(thy, visited, check_proof, print_time, verbose).parse(s)
 
 
 def read_theory_file(theory_name: str) -> str:
@@ -1097,12 +1293,16 @@ def read_theory_file(theory_name: str) -> str:
         string content of the file.
 
     """
-    with open("./osverify/theory/%s.thy" % theory_name) as f:
+    # The theory file is located in the osverify/theory folder
+    current_file_path = os.path.abspath(__file__)
+    current_dirname = os.path.dirname(current_file_path)
+    theory_path = os.path.join(current_dirname, "theory/%s.thy" % theory_name)
+    with open(theory_path) as f:
         return f.read()
 
 
-def load_theory_internal(theory_name: str, thy: OSTheory, visited: Set[str], *,
-                         check_proof=False, verbose=False):
+def load_theory_internal(theory_name: str, thy: OSTheory, visited: set[str], *,
+                         check_proof=False, print_time=False, verbose=False):
     """Load of theory file with the given name, internal version.
 
     Parameters
@@ -1116,6 +1316,8 @@ def load_theory_internal(theory_name: str, thy: OSTheory, visited: Set[str], *,
         set of theories that are already visited. Modified by this function.
     check_proof : bool, default to False
         whether to check proof during loading.
+    print_time : bool, default to False
+        whether to print timing information for each query.
     verbose : bool, default to False
         whether to print debugging information during load
 
@@ -1128,10 +1330,12 @@ def load_theory_internal(theory_name: str, thy: OSTheory, visited: Set[str], *,
     if verbose:
         print("read file %s" % theory_name)
     content = read_theory_file(theory_name)
-    parse_theory_items(thy, content, visited, check_proof=check_proof, verbose=verbose)
+    parse_theory_items(thy, content, visited, check_proof=check_proof,
+                       print_time=print_time, verbose=verbose)
 
 
 def load_theory(theory_name: str, *,
+                print_time: bool = False,
                 verbose: bool = False,
                 check_proof: Union[bool, str] = False) -> OSTheory:
     """Load theory file with the given name.
@@ -1140,6 +1344,8 @@ def load_theory(theory_name: str, *,
     ----------
     theory_name : str
         name of the theory to be parsed.
+    print_time : bool, default to False
+        whether to print timing information for each query.
     verbose : bool, default to False
         whether to print debugging information during load.
     check_proof : Union[bool, str], default to False
@@ -1155,5 +1361,5 @@ def load_theory(theory_name: str, *,
     thy = os_theory.OSTheory()
     visited = set()
     load_theory_internal(theory_name, thy, visited, check_proof=check_proof,
-                         verbose=verbose)
+                         print_time=print_time, verbose=verbose)
     return thy

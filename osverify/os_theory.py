@@ -1,13 +1,14 @@
 """Theory definitions"""
 
-from typing import Dict, Iterable, List, Optional, Tuple, Set
+from typing import Iterable, Optional, TypeGuard
 
 from osverify import os_struct
 from osverify import os_term
 from osverify import os_fixp
 from osverify import os_query
 from osverify.os_struct import OSType
-from osverify.os_term import OSTerm
+from osverify.os_term import OSTerm, OSOp, VarContext, GenField
+from osverify.os_util import indent
 
 
 class Theorem:
@@ -15,6 +16,12 @@ class Theorem:
     
     A theorem is given by a list of type parameters, list of parameters,
     and a proposition.
+
+    The input prop is a single statement with free variables, but not
+    without schematic variables (any assumptions of the theorem are
+    changed to implies beforehand). The schematic version of the theorem
+    and the forall version of the theorem are obtained by calling the
+    respective methods.
     
     """
     def __init__(self, name: str, type_params: Iterable[str],
@@ -30,10 +37,19 @@ class Theorem:
         return self.sch_theorem
     
     def get_forall_theorem(self, tys: Iterable[OSType]) -> OSTerm:
-        """Obtain version of the theorem with forall-quantification."""
+        """Obtain version of the theorem with forall-quantification.
+        
+        Parameters
+        ----------
+        tys: Iterable[OSType]
+            list of type parameters, in order to instantiate the type
+            variables of the theorem.
+
+        """
         if len(self.type_params) != len(tys):
             raise AssertionError(
-                "get_forall_theorem: expect %s type parameters for %s." % (len(self.type_params), self.name))
+                f"get_forall_theorem: expect {len(self.type_params)} type"
+                 "parameters for {self.name}.")
         tyinst = dict(zip(self.type_params, tys))
         res = self.prop.subst_type(tyinst)
         params = [param.subst_type(tyinst) for param in self.params]
@@ -42,20 +58,6 @@ class Theorem:
         else:
             return res
 
-class TheoremSpec:
-    """Specification for applying a theorem."""
-    def __init__(self, thm_name: str, tys: Iterable[os_struct.OSType]):
-        self.thm_name = thm_name
-        self.tys = tuple(tys)
-
-    def __str__(self):
-        if self.tys:
-            return "%s<%s>" % (self.thm_name, ", ".join(str(ty) for ty in self.tys))
-        else:
-            return self.thm_name
-        
-    def __repr__(self):
-        return "TheoremSpec(%s, %s)" % (self.thm_name, repr(self.tys))
 
 class OSTheory:
     """Represents the current theory"""
@@ -64,46 +66,53 @@ class OSTheory:
         self.decls = []
 
         # Mapping from structure to their definitions
-        self.structs: Dict[str, os_struct.Struct] = dict()
-
-        # Mapping from constants to their values
-        self.const_val: Dict[str, int] = dict()
+        self.structs: dict[str, os_struct.Struct] = dict()
 
         # Mapping from functions to their definition
-        self.fixps: Dict[str, os_fixp.OSFunction] = dict()
+        self.fixps: dict[str, os_fixp.OSFunction] = dict()
 
         # Mapping of type alias definitions
-        self.typedefs: Dict[str, OSType] = dict()
+        self.typedefs: dict[str, OSType] = dict()
 
         # Mapping of datatype definitions
-        self.datatypes: Dict[str, os_struct.Datatype] = dict()
+        self.datatypes: dict[str, os_struct.Datatype] = dict()
 
         # Mapping of axiomatic datatype definitions
-        self.axiom_types: Dict[str, OSType] = dict()
+        self.axiom_types: dict[str, os_struct.AxiomType] = dict()
 
         # Mapping from constructors to their datatype
-        self.constr_datatype: Dict[str, str] = dict()
+        self.constr_datatype: dict[str, str] = dict()
 
         # Mapping from constructors to their types
-        self.constr_types: Dict[str, OSType] = dict()
+        self.constr_types: dict[str, OSType] = dict()
 
         # Mapping of axiomatic function definitions
-        self.axiom_func: Dict[str, os_struct.AxiomDef] = dict()
+        self.axiom_func: dict[str, os_struct.AxiomDef] = dict()
 
         # Mapping from theorem (query) names to queries
-        self.queries: Dict[str, os_query.Query] = dict()
+        self.queries: dict[str, os_query.Query] = dict()
 
         # Mapping from theorem names to statements
-        self.theorems: Dict[str, Theorem] = dict()
+        self.theorems: dict[str, Theorem] = dict()
 
         # List of type parameters for each theorem.
-        self.type_params: Dict[str, Tuple[str]] = dict()
+        self.type_params: dict[str, tuple[str]] = dict()
 
         # Mapping from attributes to list of theorem having that attribute.
-        self.attribute_map: Dict[str, List[str]] = dict()
+        self.attribute_map: dict[str, list[str]] = dict()
 
         # List of equality theorems used for rewriting
         self.attribute_map["rewrite"] = list()
+
+    def __str__(self):
+        res = ""
+        for _, ty_def in self.axiom_types.items():
+            res += f"{ty_def}\n"
+        for _, func_def in self.axiom_func.items():
+            res += f"{func_def}\n"
+        for name, func_def in self.fixps.items():
+            res += f"{name}: {func_def.get_func_type()}\n"
+        return res
 
     def add_theorem(self, name: str, thm: Theorem):
         """Add theorem with the given name."""
@@ -119,14 +128,6 @@ class OSTheory:
         
         self.decls.append(struct)
         self.structs[struct.struct_name] = struct
-
-    def add_consts(self, consts: os_struct.ConstDefList):
-        """Add constant declarations to the theory."""
-        self.decls.append(consts)
-        for const_def in consts.const_defs:
-            if const_def.const_name in self.const_val:
-                raise AssertionError("add_consts: constant %s already defined" % const_def.const_name)
-            self.const_val[const_def.const_name] = const_def.val
 
     def add_function(self, fixp: os_fixp.OSFunction):
         """Add function declaration to the theory"""
@@ -166,7 +167,7 @@ class OSTheory:
                     # TODO: add default cases
                     pass
 
-    def get_func_type(self, func_name: str) -> Tuple[OSType, Tuple[str]]:
+    def get_func_type(self, func_name: str) -> tuple[OSType, tuple[str]]:
         """Obtain the parameterized type of the function.
         
         Functions in the theory are divided into the following classes:
@@ -180,7 +181,7 @@ class OSTheory:
         -------
         OSType
             type of the function
-        Tuple[str]
+        tuple[str]
             ordered list of type parameters in the returned type
 
         """
@@ -261,7 +262,7 @@ class OSTheory:
 
     def is_defined_type(self, name: str):
         """Return whether name is a defined type."""
-        return name in self.typedefs or name in self.datatypes
+        return name in self.typedefs or name in self.datatypes or name in self.axiom_types
 
     def add_typedef(self, typedef: os_struct.TypeDef):
         """Add type alias definition."""
@@ -317,18 +318,33 @@ class OSTheory:
         
         This function automatically instantiates the type parameters according
         to the input type.
+
+        Parameters
+        ----------
+        ty: OSType
+            type of the overall term, either structure type or datatype
+        field_name: str
+            name of the field to query for
         
         """
         if isinstance(ty, os_struct.OSStructType):
             struct = self.structs[ty.name]
+            if field_name not in struct.field_map:
+                raise AssertionError(
+                    "get_field_type: field %s not found in structure %s" % (field_name, ty.name))
             return struct.field_map[field_name]
         elif isinstance(ty, os_struct.OSHLevelType) and ty.name in self.datatypes:
             datatype = self.datatypes[ty.name]
             # Note we need to instantiate the types
             tyinst = dict(zip(datatype.params, ty.params))
+            if field_name == "id":
+                return os_struct.Int
+            elif field_name not in datatype.field_map:
+                raise AssertionError(
+                    "get_field_type: field %s not found in datatype %s" % (field_name, ty.name))
             return datatype.field_map[field_name].subst(tyinst)
         else:
-            raise AssertionError
+            raise NotImplementedError(f"get_field_type: try to get field {field_name} from {ty}")
 
 
 class TypeCheckException(Exception):
@@ -357,8 +373,6 @@ def expand_type(thy: OSTheory, ty: OSType) -> OSType:
     """
     if isinstance(ty, (os_struct.OSPrimType, os_struct.OSStructType, os_struct.OSBoundType)):
         return ty
-    elif isinstance(ty, os_struct.OSArrayType):
-        return os_struct.OSArrayType(expand_type(thy, ty.base_type))
     elif isinstance(ty, os_struct.OSHLevelType):
         if ty.name in thy.typedefs:
             return expand_type(thy, thy.typedefs[ty.name])
@@ -370,21 +384,49 @@ def expand_type(thy: OSTheory, ty: OSType) -> OSType:
     else:
         raise NotImplementedError("expand_type on %s: %s" % (type(ty), ty))
 
-def equal_type(thy: OSTheory, ty1: OSType, ty2: OSType) -> bool:
-    """Check whether two types are equal after calling `expand_type`"""
-    return expand_type(thy, ty1) == expand_type(thy, ty2)
-
-def match_type(thy: OSTheory, pat: OSType, ty: OSType, tyinst: Dict[str, OSType]) -> bool:
-    """Match two types after expansion.
-
-    Note only schematic type variables are matched. To match on bound
-    type variables, call `make_schematic` first.
+def check_type_gen_field(thy: OSTheory, base_ty: OSType,
+                         gen_field: GenField,
+                         ctxt: VarContext,
+                         ty: Optional[OSType] = None) -> Optional[OSType]:
+    """Perform type checking on a generalized field, fill in unknown types.
     
+    Meaning of parameters is similar to `check_type`.
+
     """
-    return expand_type(thy, pat).match(expand_type(thy, ty), tyinst)
+    # print("check_type_gen_field: base_ty = %s, gen_field = %s, ty = %s, ctxt = %s" % (base_ty, gen_field, ty, ctxt))
+    if gen_field.type is not None and ty is not None:
+        if ty != gen_field.type:
+            raise TypeCheckException(
+                f"type mismatch for {gen_field}. Expected {ty}, actual {gen_field.type}")
+    elif gen_field.type is not None and ty is None:
+        ty = gen_field.type
+
+    if isinstance(gen_field, os_term.AtomGenField):
+        gen_field.type = thy.get_field_type(base_ty, gen_field.name)
+        return gen_field.type
+    elif isinstance(gen_field, os_term.IndexGenField):
+        base_ty = check_type_gen_field(thy, base_ty, gen_field.base, ctxt)
+        if isinstance(base_ty, os_struct.OSHLevelType) and base_ty.name == "Map":
+            key_ty, val_ty = base_ty.params
+            check_type(thy, gen_field.index, ctxt, key_ty)
+            gen_field.type = val_ty
+            return val_ty
+        elif isinstance(base_ty, os_struct.OSHLevelType) and base_ty.name == "Seq":
+            ele_ty = base_ty.params[0]
+            check_type(thy, gen_field.index, ctxt, os_struct.Int)
+            gen_field.type = ele_ty
+            return ele_ty
+        else:
+            raise TypeCheckException("expected Map or Seq type, found %s" % base_ty)
+    elif isinstance(gen_field, os_term.FieldGetGenField):
+        base_ty = check_type_gen_field(thy, base_ty, gen_field.base, ctxt)
+        gen_field.type = thy.get_field_type(base_ty, gen_field.field)
+        return gen_field.type
+    else:
+        raise NotImplementedError("check_type_gen_field: %s" % type(gen_field))
 
 def check_type(thy: OSTheory, t: OSTerm,
-               ctxt: Dict[str, OSType],
+               ctxt: VarContext,
                ty: Optional[OSType] = None) -> Optional[OSType]:
     """Perform type checking on the term, fill in unknown types.
     
@@ -400,7 +442,7 @@ def check_type(thy: OSTheory, t: OSTerm,
         Current theory information
     t : OSTerm
         Term for type inference and checking
-    ctxt : Dict[str, OSType]
+    ctxt : VarContext
         Context containing inferred types of bound variables
     ty : Optional[OSType]
         Existing type of t to be checked. None if not available
@@ -413,7 +455,7 @@ def check_type(thy: OSTheory, t: OSTerm,
     """
     # print("check_type: t = %s, ty = %s, ctxt = %s" % (t, ty, ctxt))
     if t.type is not None and ty is not None:
-        if not equal_type(thy, ty, t.type):
+        if ty != t.type:
             raise TypeCheckException("type mismatch for %s. Expected %s, actual %s" % (t, ty, t.type))
     elif t.type is not None and ty is None:
         ty = t.type
@@ -430,22 +472,27 @@ def check_type(thy: OSTheory, t: OSTerm,
             # For schematic variables, just use provided type
             if ty is not None and t.type is None:
                 t.type = ty
-            elif ty is not None and t.type is not None and not equal_type(thy, ty, t.type):
-                raise TypeCheckException("type mismatch for %s. Expected %s, actual %s" % (t, ty, t.type))
+            elif ty is not None and t.type is not None and ty != t.type:
+                raise TypeCheckException(f"type mismatch for {t}. Expected {ty}, actual {t.type}")
             return t.type
         else:
             # Lookup type of variables from context
-            if t.name not in ctxt:
-                raise TypeCheckException("variable %s not found" % t.name)
-            t.type = ctxt[t.name]
+            if not ctxt.contains_var(t.name):
+                raise TypeCheckException(f"variable {t.name} not found")
+            t.type = ctxt.get_var_type(t.name)
             if ty is not None and t.type is None:
-                ctxt[t.name] = ty
+                ctxt.update_var_decl(t.name, ty)
                 t.type = ty
-            elif ty is not None and t.type is not None and not equal_type(thy, ty, t.type):
-                raise TypeCheckException("type mismatch for %s. Expected %s, actual %s" % (t, ty, t.type))
+            if ty is not None and ty != t.type:
+                raise TypeCheckException(f"type mismatch for {t}. Expected {ty}, actual {t.type}")
             return t.type
-    elif isinstance(t, os_term.OSConst) or isinstance(t, os_term.OSNumber):
-        # Constants and numbers can use provided type
+    elif isinstance(t, os_term.OSNumber):
+        # Numbers can use provided type
+        if ty is not None:
+            if os_struct.is_num_type(ty) and isinstance(t.val, bool):
+                raise TypeCheckException(f"type mismatch for {t}. Expected {ty}, actual bool")
+            if ty == os_struct.Bool and not (t == os_term.true or t == os_term.false):
+                raise TypeCheckException(f"type mismatch for {t}. Expected bool, actual numeric type")
         if t.type is None and ty is None:
             return None
         elif t.type is None:
@@ -453,7 +500,7 @@ def check_type(thy: OSTheory, t: OSTerm,
             return ty
         elif ty is None:
             return t.type
-        elif not equal_type(thy, ty, t.type):
+        elif ty != t.type:
             raise TypeCheckException("type mismatch for %s. Expected %s, actual %s" % (t, ty, t.type))
         else:
             return t.type
@@ -481,6 +528,12 @@ def check_type(thy: OSTheory, t: OSTerm,
                     else:
                         t.type = ty0
                         return ty0
+            elif t.op == '-':
+                if ty is not None and not os_struct.is_num_type(ty):
+                    raise TypeCheckException("expected number type for %s" % t)
+                check_type(thy, t.args[0], ctxt, ty)
+                t.type = ty
+                return ty
             else:
                 raise AssertionError("unrecognized unary operator %s" % t.op)
         if len(t.args) != 2:
@@ -490,7 +543,7 @@ def check_type(thy: OSTheory, t: OSTerm,
             # Return type and both arguments are bitvector types
             if ty is not None:
                 if not os_struct.is_bv_type(ty):
-                    raise TypeCheckException("expected bitvector type for %s" % t)
+                    raise TypeCheckException("%s: expected bitvector type for %s" % (t.op, t))
                 check_type(thy, t.args[0], ctxt, ty)
                 check_type(thy, t.args[1], ctxt, ty)
                 t.type = ty
@@ -503,15 +556,15 @@ def check_type(thy: OSTheory, t: OSTerm,
                         return None
                     else:
                         if not os_struct.is_bv_type(ty1):
-                            raise TypeCheckException("expected bitvector type for %s" % t.args[1])
+                            raise TypeCheckException("%s: expected bitvector type for %s" % (t.op, t.args[1]))
                         t.type = ty1
                         return check_type(thy, t.args[0], ctxt, ty1)
                 else:
                     if not os_struct.is_bv_type(ty0):
-                        raise TypeCheckException("expected bitvector type for %s" % t.args[0])
+                        raise TypeCheckException("%s: expected bitvector type for %s" % (t.op, t.args[0]))
                     t.type = ty0
                     return check_type(thy, t.args[1], ctxt, ty0)
-        elif t.op in ["+", "-", "*", "/"]:
+        elif t.op in ["+", "-", "*", "/", "%", "**"]:
             # Return type and both arguments are numeric types
             if ty is not None:
                 if not os_struct.is_num_type(ty):
@@ -548,13 +601,13 @@ def check_type(thy: OSTheory, t: OSTerm,
                 else:
                     if not os_struct.is_num_type(ty1):
                         raise TypeCheckException("expected numeric type for %s" % t.args[1])
-                    t.type = ty1
+                    t.type = os_struct.Bool
                     check_type(thy, t.args[0], ctxt, ty1)
                     return os_struct.Bool
             else:
                 if not os_struct.is_num_type(ty0):
                     raise TypeCheckException("expected bitvector type for %s" % t.args[0])
-                t.type = ty0
+                t.type = os_struct.Bool
                 check_type(thy, t.args[1], ctxt, ty0)
                 return os_struct.Bool
         elif t.op in ['&&', '||', '->']:
@@ -584,7 +637,20 @@ def check_type(thy: OSTheory, t: OSTerm,
         else:
             raise AssertionError("unrecognized binary operator %s" % t.op)
     elif isinstance(t, os_term.OSFun):
-        if t.func_name == "ite":
+        if t.func_name == "default":
+            # Special case: default value
+            if t.type is None and ty is None:
+                return None
+            elif t.type is None:
+                t.type = ty
+                return ty
+            elif ty is None:
+                return t.type
+            elif ty != t.type:
+                raise TypeCheckException("type mismatch for %s. Expected %s, actual %s" % (t, ty, t.type))
+            else:
+                return t.type
+        elif t.func_name == "ite":
             # Special function: if-then-else.
             # The condition must have type bool, type of if-branch, else-branch and
             # return type must be the same.
@@ -612,45 +678,37 @@ def check_type(thy: OSTheory, t: OSTerm,
             assert len(t.args) == 1
             ty0 = check_type(thy, t.args[0], ctxt)
             if not os_struct.is_bv_type(ty0):
-                raise TypeCheckException("%s should have bitvector type" % t.args[0])
+                raise TypeCheckException(f"{t.args[0]} in {t} should have bitvector type")
+            if ty is not None and ty != os_struct.Int:
+                raise TypeCheckException(f"{t} should have integer type")
             t.type = os_struct.Int
             return t.type
-        elif t.func_name == "nat":
-            # Coersion from bitvector type to natural number
+        elif t.func_name == "int32u":
+            # Coersion from integer to bitvector type
             assert len(t.args) == 1
-            ty0 = check_type(thy, t.args[0], ctxt)
-            if not os_struct.is_bv_type(ty0):
-                raise TypeCheckException("%s should have bitvector type" % t.args[0])
-            t.type = os_struct.Nat
+            check_type(thy, t.args[0], ctxt, os_struct.Int)
+            if ty is not None and ty != os_struct.Int32U:
+                raise TypeCheckException(f"{t} should have int32u type")
+            t.type = os_struct.Int32U
             return t.type
-        elif t.func_name == "nth":
-            assert len(t.args) == 2
-            ty0 = check_type(thy, t.args[0], ctxt)
-            if not isinstance(ty0, os_struct.OSArrayType):
-                raise TypeCheckException("%s should have array type" % t.args[0])
-            ty1 = check_type(thy, t.args[1], ctxt)
-            if not os_struct.is_num_type(ty1):
-                raise TypeCheckException("%s should have numeric type" % t.args[1])
-            t.type = ty0.base_type
+        elif t.func_name == "int16u":
+            # Coersion from integer to bitvector type
+            assert len(t.args) == 1
+            check_type(thy, t.args[0], ctxt, os_struct.Int)
+            if ty is not None and ty != os_struct.Int16U:
+                raise TypeCheckException(f"{t} should have int16u type")
+            t.type = os_struct.Int16U
             return t.type
-        elif t.func_name == "K":
-            ty = check_type(thy, t.args[0], ctxt)
-            t.type = os_struct.OSArrayType(ty)
+        elif t.func_name == "int8u":
+            # Coersion from integer to bitvector type
+            assert len(t.args) == 1
+            check_type(thy, t.args[0], ctxt, os_struct.Int)
+            if ty is not None and ty != os_struct.Int8U:
+                raise TypeCheckException(f"{t} should have int8u type")
+            t.type = os_struct.Int8U
             return t.type
-        elif t.func_name == "Store":
-            assert len(t.args) == 3
-            ty0 = check_type(thy, t.args[0], ctxt)
-            if not isinstance(ty0, os_struct.OSArrayType):
-                raise TypeCheckException("%s should have array type" % t.args[0])
-            ty1 = check_type(thy, t.args[1], ctxt)
-            if not os_struct.is_num_type(ty1):
-                raise TypeCheckException("%s should have numeric type" % t.args[1])
-            ty2 = check_type(thy, t.args[2], ctxt)
-            if ty0.base_type != ty2:
-                raise TypeCheckException("stored value %s should have type %s" % (t.args[2], ty0.base_type))
-            t.type = ty0
-            return t.type
-        elif t.func_name in thy.constr_types or t.func_name in thy.fixps or t.func_name in ctxt or t.func_name in thy.axiom_func:
+        elif t.func_name in thy.constr_types or t.func_name in thy.fixps or \
+             ctxt.contains_var(t.func_name) or t.func_name in thy.axiom_func:
             if t.func_name in thy.constr_types:
                 constr_type = thy.constr_types[t.func_name]
             elif t.func_name in thy.fixps:
@@ -658,7 +716,7 @@ def check_type(thy: OSTheory, t: OSTerm,
             elif t.func_name in thy.axiom_func:
                 constr_type = thy.axiom_func[t.func_name].type
             else:
-                constr_type = ctxt[t.func_name]
+                constr_type = ctxt.get_var_type(t.func_name)
             # Change all type variables in constr_type to schematic
             constr_type = constr_type.make_schematic(constr_type.get_vars())
             if isinstance(constr_type, os_struct.OSHLevelType):
@@ -670,7 +728,7 @@ def check_type(thy: OSTheory, t: OSTerm,
                         return None  # unable to infer type
                     t.type = constr_type
                 else:
-                    if not match_type(thy, constr_type, ty, dict()):
+                    if not constr_type.match(ty, dict()):
                         raise TypeCheckException("type mismatch for %s: expected %s, actual %s" % (t, ty, constr_type))
                     t.type = ty
                 return t.type
@@ -684,17 +742,17 @@ def check_type(thy: OSTheory, t: OSTerm,
                 for i in range(len(t.args)):
                     param_ty = check_type(thy, t.args[i], ctxt)
                     if param_ty is not None:
-                        if not match_type(thy, constr_type.arg_types[i], param_ty, tyinst):
+                        if not constr_type.arg_types[i].match(param_ty, tyinst):
                             raise TypeCheckException("type mismatch on %s: expected %s, actual %s" % (
-                                t.args[i], constr_type.arg_types[i], param_ty))
+                                t.args[i], constr_type.arg_types[i].subst(tyinst), param_ty))
                 if ty is not None:
-                    if not match_type(thy, constr_type.ret_type, ty, tyinst):
+                    if not constr_type.ret_type.match(ty, tyinst):
                         raise TypeCheckException("type mismatch: expected %s, actual %s" % (
-                            ty, constr_type.ret_type))
+                            ty, constr_type.ret_type.subst(tyinst)))
                 if t.type is not None:
-                    if not match_type(thy, constr_type.ret_type, t.type, tyinst):
+                    if not constr_type.ret_type.match(t.type, tyinst):
                         raise TypeCheckException("type mismatch: expected %s, actual %s" % (
-                            t.type, constr_type.ret_type))
+                            t.type, constr_type.ret_type.subst(tyinst)))
 
                 # Now we expect all type variables have been instantiated
                 if len(vars) != len(tyinst):
@@ -704,18 +762,26 @@ def check_type(thy: OSTheory, t: OSTerm,
                 for i in range(len(t.args)):
                     check_type(thy, t.args[i], ctxt, constr_type.arg_types[i].subst(tyinst))
                 if ty is not None:
-                    if not equal_type(thy, ty, constr_type.ret_type.subst(tyinst)):
+                    if ty != constr_type.ret_type.subst(tyinst):
                         raise TypeCheckException("type mismatch: expected %s, actual %s" % (
                             ty, constr_type.ret_type.subst(tyinst)))
                 if t.type is not None:
-                    if not equal_type(thy, t.type, constr_type.ret_type.subst(tyinst)):
+                    if t.type != constr_type.ret_type.subst(tyinst):
                         raise TypeCheckException("type mismatch: expected %s, actual %s" % (
                             t.type, constr_type.ret_type.subst(tyinst)))
 
                 t.type = constr_type.ret_type.subst(tyinst)
                 return t.type
             else:
-                raise AssertionError
+                if len(t.args) > 0:
+                    raise TypeCheckException("function %s does not take arguments" % t.func_name)
+                if ty is None:
+                    t.type = constr_type
+                else:
+                    if constr_type != ty:
+                        raise TypeCheckException("type mismatch for %s: expected %s, actual %s" % (t, ty, constr_type))
+                    t.type = ty
+                return t.type
         else:
             raise AssertionError("function %s is not found" % t.func_name)
     elif isinstance(t, os_term.FieldGet):
@@ -731,39 +797,81 @@ def check_type(thy: OSTheory, t: OSTerm,
     elif isinstance(t, os_term.OSStructUpdate):
         ori_type = check_type(thy, t.ori_expr, ctxt)
         if not isinstance(ori_type, os_struct.OSStructType):
-            raise TypeCheckException("%s should have structure type, but get %s" % (t.ori_expr, type(struct_type)))
+            raise TypeCheckException("%s should have structure type, but get %s" % (t.ori_expr, type(ori_type)))
         t.type = ori_type
         for field_name, expr in t.dict_updates.items():
             check_type(thy, expr, ctxt, thy.get_field_type(ori_type, field_name))
+        return t.type
+    elif isinstance(t, os_term.OSStructUpdateGen):
+        ori_type = check_type(thy, t.ori_expr, ctxt)
+        if not isinstance(ori_type, os_struct.OSStructType):
+            raise TypeCheckException("%s should have structure type, but get %s" % (t.ori_expr, type(ori_type)))
+        t.type = ori_type
+        expr_type = check_type_gen_field(thy, ori_type, t.gen_field, ctxt, t.expr.type)
+        check_type(thy, t.expr, ctxt, expr_type)
         return t.type
     elif isinstance(t, os_term.OSStructVal):
         struct_type = os_struct.OSStructType(t.struct_name)
         for field_name, expr in t.vals:
             check_type(thy, expr, ctxt, thy.get_field_type(struct_type, field_name))
         return t.type
+    elif isinstance(t, os_term.SeqLiteral):
+        if ty is None:
+            if len(t.exprs) == 0:
+                return None
+            expr_type = None
+            for expr in t.exprs:
+                expr_type = check_type(thy, expr, ctxt, None)
+                if expr_type is not None:
+                    break
+            if expr_type is None:
+                return None
+            for expr in t.exprs:
+                check_type(thy, expr, ctxt, expr_type)
+            t.type = os_struct.SeqType(expr_type)
+            return t.type
+        else:
+            if not os_struct.is_seq_type(ty):
+                raise TypeCheckException(f"{t} should have sequence type, get {ty}")
+            ele_ty = ty.params[0]
+            for expr in t.exprs:
+                check_type(thy, expr, ctxt, ele_ty)
+            t.type = ty
+            return t.type
     elif isinstance(t, os_term.OSLet):
         # First, compute the type of the bound variable, then use it to
         # infer/check type of body. 
         var_ty = check_type(thy, t.expr, ctxt)
-        ctxt[t.var_name] = var_ty
-        body_ty = check_type(thy, t.rhs, ctxt, ty)
+        ctxt.add_var_decl(t.var_name, var_ty)
+        body_ty = check_type(thy, t.body, ctxt, ty)
         t.type = body_ty
-        del ctxt[t.var_name]
+        ctxt.del_var_decl(t.var_name)
         return t.type
     elif isinstance(t, os_term.OSQuant):
         for param in t.params:
-            ctxt[param.name] = param.type
+            ctxt.add_var_decl(param.name, param.type)
         check_type(thy, t.body, ctxt, os_struct.Bool)
         t.type = os_struct.Bool
         for param in t.params:
-            del ctxt[param.name]
+            ctxt.del_var_decl(param.name)
         return t.type
     elif isinstance(t, os_term.OSQuantIn):
-        ctxt[t.param.name] = t.param.type
         check_type(thy, t.collection, ctxt)
+        if os_struct.is_seq_type(t.collection.type):
+            val_ty = t.collection.type.params[0]
+            if val_ty != t.param.type:
+                raise TypeCheckException(
+                    f"expected value type {t.param.type} for {t.collection}, actual {val_ty}")
+        elif os_struct.is_map_type(t.collection.type):
+            key_ty = t.collection.type.params[0]
+            if key_ty != t.param.type:
+                raise TypeCheckException(
+                    f"expected key type {t.param.type} for {t.collection}, actual {key_ty}")
+
+        ctxt.add_var_decl(t.param.name, t.param.type)
         check_type(thy, t.body, ctxt, os_struct.Bool)
         t.type = os_struct.Bool
-        del ctxt[t.param.name]
+        ctxt.del_var_decl(t.param.name)
         return t.type
     elif isinstance(t, os_term.OSSwitch):
         # Check type of term used in switch
@@ -774,12 +882,12 @@ def check_type(thy: OSTheory, t: OSTerm,
                 # Obtain types of bound variables
                 _, bound_vars = branch.pattern.get_vars()
                 for bound_var in bound_vars:
-                    ctxt[bound_var.name] = bound_var.type
+                    ctxt.add_var_decl(bound_var.name, bound_var.type)
                 check_type(thy, branch.pattern, ctxt, switch_ty)
                 # Use type of bound variables to check type of expr
                 ty = check_type(thy, branch.expr, ctxt, ty)
                 for bound_var in bound_vars:
-                    del ctxt[bound_var.name]
+                    ctxt.del_var_decl(bound_var.name)
             elif isinstance(branch, os_term.OSSwitchBranchDefault):
                 # Default case: just check type is correct
                 ty = check_type(thy, branch.expr, ctxt, ty)
@@ -799,10 +907,10 @@ def is_standard_switch(thy: OSTheory, t: os_term.OSSwitch) -> bool:
     the list of constructors must be full.
     
     Any switch expression can be simplified into one in standard form
-    (using the simplify_switch function).
+    (using `normalize_switch`).
 
     """
-    ty = expand_type(thy, t.switch_expr.type)
+    ty = t.switch_expr.type
     if not (isinstance(ty, os_struct.OSHLevelType) and ty.name in thy.datatypes):
         return False
     datatype = thy.datatypes[ty.name]
@@ -810,7 +918,7 @@ def is_standard_switch(thy: OSTheory, t: os_term.OSSwitch) -> bool:
     if len(t.branches) == 0:
         return False
 
-    constrs: Set[str] = set()
+    constrs: set[str] = set()
 
     def is_standard_branch(branch: os_term.OSSwitchBranch) -> bool:
         nonlocal constrs
@@ -831,57 +939,129 @@ def is_standard_switch(thy: OSTheory, t: os_term.OSSwitch) -> bool:
         return all(is_standard_branch(branch) for branch in t.branches) and \
             len(t.branches) == len(datatype.branches)
 
+def is_defining_eq(thy: OSTheory, t: OSTerm) -> TypeGuard[OSOp]:
+    """Return whether `t` is a defining equation.
+    
+    A defining equation is used for rewriting the remaining parts of
+    the proof state. It does not need to be translated for SMT solving.
+
+    """
+    if not (os_term.is_eq(t) and os_term.is_atomic_term(t.lhs)):
+        return False
+
+    _, indices = os_term.dest_atomic_term(t.lhs)
+    if len(indices) > 0:
+        return False
+
+    ty = t.lhs.type
+    return os_struct.is_map_type(ty) or os_struct.is_seq_type(ty) or \
+        isinstance(ty, os_struct.OSStructType) or \
+        (isinstance(ty, os_struct.OSHLevelType) and ty.name in thy.datatypes)
+
 class OSContext:
     """Represents context of the current query."""
-    def __init__(self, thy: OSTheory):
+    def __init__(self, thy: OSTheory, var_ctxt: VarContext):
         # Associated theory
         self.thy = thy
 
-        # Mapping from variables to their type
-        self.var_decls: Dict[str, OSType] = dict()
+        # Variable context
+        self.var_ctxt = var_ctxt
 
-        # Other bound variables
-        self.bound_vars: List[str] = list()
+        # List of equalities
+        self._eqs: list[OSTerm] = list()
 
-        # Default structure
-        self.default_struct: List[str] = list()
+        # List of disequalities
+        self._diseqs: list[OSTerm] = list()
 
-        # Temporary label for recursive datatype
-        self.datatype_decl: Optional[str] = None
+    def __str__(self):
+        res = "context {\n"
+        for type_param in self.var_ctxt.type_params:
+            res += indent("type %s;" % type_param, 2) + '\n'
+        for var in self.var_ctxt.data:
+            res += indent("fixes %s: %s;" % (var.name, var.type), 2) + '\n'
+        if self._eqs:
+            res += indent("eqs: %s" % ', '.join(str(eq) for eq in self._eqs), 2) + '\n'
+        if self._diseqs:
+            res += indent("diseqs: %s" % ', '.join(str(eq) for eq in self._diseqs), 2) + '\n'
+        res += "}"
+        return res
 
-        # Temporary type parameters
-        self.type_params: List[str] = list()
+    def add_var_decl(self, var_name: str, var_type: OSType):
+        """Add variable declaration.""" 
+        self.var_ctxt.add_var_decl(var_name, var_type)
 
-        # List of declared tactic variables
-        self.tactic_vars: Set[str] = set()
+    def del_var_decl(self, var_name: str):
+        """Remove variable declaration."""
+        self.var_ctxt.del_var_decl(var_name)
+    
+    def variant_var(self, var: os_term.OSVar) -> os_term.OSVar:
+        """Obtain variant of the given variable."""
+        return self.var_ctxt.variant_var(var)
 
-    def add_var_decl(self, var_name: str, type: OSType):
-        """Add variable declaration"""
-        if var_name in self.var_decls:
-            raise AssertionError("add_var_decl: variable %s already defined" % var_name)
- 
-        self.var_decls[var_name] = type
+    def variant_vars(self, vars: Iterable[os_term.OSVar]) -> list[os_term.OSVar]:
+        """Obtain variants of a list of variables."""
+        return self.var_ctxt.variant_vars(vars)
 
-    def lookup_field(self, field_name: str) -> Optional[OSType]:
-        """Return type of a field from default structure."""
-        if not self.default_struct:
-            return None  # no structure is set
+    def process_fact(self, fact: OSTerm):
+        """Process the given fact for the context."""
+        if os_term.is_eq(fact):
+            self.add_equality(fact)
+        elif os_term.is_diseq(fact):
+            self.add_disequality(fact)
+        else:
+            pass
 
-        if self.default_struct[-1] not in self.thy.structs:
-            raise AssertionError("lookup_field: default structure %s not found in theory" % self.default_struct[-1])
+    def add_equality(self, eq: OSTerm):
+        """Add given equality to the context."""
+        if not os_term.is_eq(eq):
+            raise AssertionError("add_equality: input term is not an equality")
+        
+        self._eqs.append(eq)
 
-        struct = self.thy.structs[self.default_struct[-1]]
-        if field_name not in struct.field_map:
-            return None  # field not found
+    def add_disequality(self, diseq: OSTerm):
+        """Add given disequality to the context."""
+        if not os_term.is_diseq(diseq):
+            raise AssertionError("add_disequality: input term is not a disequality")
 
-        return struct.field_map[field_name]
+        self._diseqs.append(diseq)
+
+    def check_equality(self, s: OSTerm, t: OSTerm) -> bool:
+        """Determine whether s == t can be derived from this context.
+        
+        Currently we only perform basic checking. Algorithm based
+        on congruence closure is to be implemented later.
+
+        """
+        if s == t:
+            return True
+        for eq in self._eqs:
+            if s == os_term.lhs(eq) and t == os_term.rhs(eq):
+                return True
+            if s == os_term.rhs(eq) and t == os_term.lhs(eq):
+                return True
+        return False
+
+    def check_disequality(self, s: OSTerm, t: OSTerm) -> bool:
+        """Determine whether s != t can be derived from this context.
+        
+        Currently we only perform basic checking. Algorithm based
+        on congruence closure is to be implemented later.
+
+        """
+        for diseq in self._diseqs:
+            if s == os_term.lhs(diseq) and t == os_term.rhs(diseq):
+                return True
+            if s == os_term.rhs(diseq) and t == os_term.lhs(diseq):
+                return True
+        return False
+
 
 class OSImports:
     """Theory import information.
     
     Attributes
     ----------
-    imports: Tuple[str]
+    imports: tuple[str]
         List of imported theories.
 
     """
@@ -903,7 +1083,7 @@ class OSAttribDecl:
         indicates direction of operation, one of "add" or "del"
     attrib_name: str
         name of the attribute to add/delete
-    th_names: Tuple[str]
+    th_names: tuple[str]
         list of theorems to add/delete
 
     """

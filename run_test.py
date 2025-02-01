@@ -20,15 +20,23 @@ def execute_unit_tests(file_paths):
     
     return result
 
+# Missing (run independently):
+# osverify/tests/parser_test
+
 file_list = [
-    'osverify/tests/type_test.py',
-    'osverify/tests/term_test.py',
-    'osverify/tests/theory_test.py',
+    'osverify/tests/auto_tactic_test.py',
     'osverify/tests/match_test.py',
+    'osverify/tests/model_test.py',
+    'osverify/tests/seplogic_test.py',
+    'osverify/tests/seq_test.py',
     'osverify/tests/simplify_test.py',
     'osverify/tests/tactic_test.py',
+    'osverify/tests/term_test.py',
+    'osverify/tests/theory_test.py',
+    'osverify/tests/type_test.py',
+    'osverify/tests/util_test.py',
     'osverify/tests/z3wrapper_test.py',
-    'osverify/tests/model_test.py'
 ]
 
-test_result = execute_unit_tests(file_list)
+if __name__ == '__main__':
+    test_result = execute_unit_tests(file_list)

@@ -2,77 +2,310 @@
 
 import unittest
 
+import osverify.os_seq
 from osverify import os_tactics
-from osverify import os_parser
+from osverify.os_parser import load_theory, parse_term, parse_proof_state
 
-basic_thy = os_parser.load_theory("basic", verbose=False)
+core_thy = load_theory("core", verbose=False)
+basic_thy = load_theory("basic", verbose=False)
+seq_thy = load_theory("seq", verbose=False)
 
 class OSTacticTest(unittest.TestCase):
-    def testInduction(self):
+    def testIntro(self):
+        thy = core_thy
+
+        state = parse_proof_state(
+            thy, """state {
+                fixes x: int32u;
+                shows forall (int32u y) {
+                    y > x
+                }
+            }"""
+        )
+        state = os_tactics.Intros(["z"]).exec(thy, state)
+
+        state2 = parse_proof_state(
+            thy, """state {
+                fixes x: int32u;
+                fixes z: int32u;
+                shows z > x
+            }"""
+        )
+        self.assertEqual(state, state2)
+
+    def testIntroForallIn(self):
         thy = basic_thy
 
-        append_nil = """
+        state = parse_proof_state(
+            thy, """state {
+                fixes x: int32u;
+                shows forall (int32u y) {
+                    y >= 0 && y < 10 -> y > x
+                }
+            }"""
+        )
+        state = os_tactics.Intros(["y1"]).exec(thy, state)
+
+        state2 = parse_proof_state(
+            thy, """state {
+                fixes x: int32u;
+                fixes y1: int32u;
+                assumes y1 >= 0 && y1 < 10;
+                shows y1 > x
+            }"""
+        )
+        self.assertEqual(state, state2)
+
+    def testIntroNoName(self):
+        thy = core_thy
+
+        state = parse_proof_state(
+            thy, """state {
+                fixes x: int32u;
+                fixes y: int32u;
+                shows forall (int32u y) {
+                    y > x
+                }
+            }"""
+        )
+        state = os_tactics.Intros().exec(thy, state)
+
+        state2 = parse_proof_state(
+            thy, """state {
+                fixes x: int32u;
+                fixes y: int32u;
+                fixes y0: int32u;
+                shows y0 > x
+            }"""
+        )
+        self.assertEqual(state, state2)
+
+    def testIntroNameConflict(self):
+        thy = core_thy
+
+        state = parse_proof_state(
+            thy, """state {
+                fixes x: int32u;
+                fixes z: int32u;
+                shows forall (int32u y) {
+                    y > x
+                }
+            }"""
+        )
+        self.assertRaises(os_tactics.TacticException,
+                          os_tactics.Intros("z").exec, thy, state)
+
+    def testDefineVar(self):
+        thy = basic_thy
+
+        state = """
         state {
             type T;
-            fixes xs: List<T>;
-            shows append(nil, xs) == xs
+            fixes xs: Seq<T>;
+            fixes ys: Seq<T>;
+            fixes zs: Seq<T>;
+            shows xs ++ ys == zs
         }
         """
-        state = os_parser.parse_proof_state(thy, append_nil)
+        state = parse_proof_state(thy, state)
+        var_ctxt = state.get_var_context()
 
-        append_nil_cons = """
+        state2 = """
         state {
             type T;
-            fixes ele : T;
-            fixes rest : List<T>;
-            assumes IH_rest: append(nil, rest) == rest;
-            shows append(nil, cons(ele, rest)) == cons(ele, rest)
+            fixes xs: Seq<T>;
+            fixes ys: Seq<T>;
+            fixes zs: Seq<T>;
+            fixes u: Seq<T>;
+            assumes u == xs ++ ys;
+            shows u == zs
         }
         """
 
-        res_states = os_tactics.Induction(os_tactics.InductionParam("xs", []), tuple()).exec(thy, state)
+        res_state = os_tactics.DefineVar("u", parse_term(thy, var_ctxt, "xs ++ ys")).exec(thy, state)
+        assert isinstance(res_state, os_tactics.ProofState)
+        self.assertEqual(res_state, parse_proof_state(thy, state2))
+
+    def testRewriteDefining(self):
+        thy = basic_thy
+
+        state = """
+        state {
+            fixes x: int32u;
+            fixes y: int32u;
+            fixes z: int32u;
+            assumes A: x == y + z;
+            shows x == z + y
+        }
+        """
+        state = parse_proof_state(thy, state)
+
+        state2 = """
+        state {
+            fixes x: int32u;
+            fixes y: int32u;
+            fixes z: int32u;
+            assumes A: x == y + z;
+            shows y + z == z + y
+        }
+        """
+
+        res_state = os_tactics.RewriteDefine("A").exec(thy, state)
+        assert isinstance(res_state, os_tactics.ProofState)
+        self.assertEqual(res_state, parse_proof_state(thy, state2))
+
+    def testRewrite(self):
+        thy = seq_thy
+
+        state = """
+        state {
+            fixes xs: Seq<int32u>;
+            fixes ys: Seq<int32u>;
+            shows 0 == |xs ++ ys|
+        }
+        """
+        state = parse_proof_state(thy, state)
+
+        state2 = """
+        state {
+            fixes xs: Seq<int32u>;
+            fixes ys: Seq<int32u>;
+            shows 0 == |xs| + |ys|
+        }
+        """
+        res_state = os_tactics.Rewrite("seq_append_length").exec(thy, state)
+        assert isinstance(res_state, os_tactics.ProofState)
+        self.assertEqual(res_state, parse_proof_state(thy, state2))
+
+    def testCasesVar(self):
+        thy = basic_thy
+
+        state = """
+        state {
+            type T;
+            fixes x: Option<T>;
+            fixes y: Option<T>;
+            shows x == y
+        }
+        """
+        state = parse_proof_state(thy, state)
+        var_ctxt = state.get_var_context()
+
+        state_none = """
+        state {
+            type T;
+            fixes y: Option<T>;
+            shows none == y
+        }
+        """
+
+        state_some = """
+        state {
+            type T;
+            fixes y: Option<T>;
+            fixes val: T;
+            shows some(val) == y
+        }
+        """
+
+        res_states = os_tactics.Cases(parse_term(thy, var_ctxt, "x")).exec(thy, state)
         self.assertEqual(res_states.num_unsolved(), 2)
         assert isinstance(res_states, os_tactics.CaseProofState)
-        self.assertEqual(res_states.cases[0][2], os_parser.parse_proof_state(
-            thy, "state { type T; shows append(nil::List<T>, nil) == nil }"))
-        self.assertEqual(res_states.cases[1][2], os_parser.parse_proof_state(
-            thy, append_nil_cons))
-        
-        append_assoc = """
-        state {
-            type T;
-            fixes xs: List<T>;
-            fixes ys: List<T>;
-            fixes zs: List<T>;
-            shows append(append(xs, ys), zs) == append(xs, append(ys, zs))
-        }
-        """
-        state = os_parser.parse_proof_state(thy, append_assoc)
+        self.assertEqual(res_states.cases[0][2], parse_proof_state(thy, state_none))
+        self.assertEqual(res_states.cases[1][2], parse_proof_state(thy, state_some))
 
-        append_assoc_nil = """
+    def testCasesExpr(self):
+        thy = basic_thy
+
+        state = """
         state {
             type T;
-            fixes ys : List<T>;
-            fixes zs : List<T>;
-            shows append(append(nil, ys), zs) == append(nil, append(ys, zs))
+            fixes i: int32u;
+            fixes m: Map<int32u, Option<T> >;
+            fixes zs: Option<T>;
+            shows get(i, m) == zs
+        }
+        """
+        state = parse_proof_state(thy, state)
+        var_ctxt = state.get_var_context()
+
+        state_none = """
+        state {
+            type T;
+            fixes i: int32u;
+            fixes m: Map<int32u, Option<T> >;
+            fixes zs: Option<T>;
+            assumes none == get(i, m);
+            shows none == zs
         }
         """
 
-        append_assoc_cons = """
+        state_some = """
         state {
             type T;
-            fixes ys : List<T>;
-            fixes zs : List<T>;
-            fixes ele : T;
-            fixes rest : List<T>;
-            assumes IH_rest: append(append(rest, ys), zs) == append(rest, append(ys, zs));
-            shows append(append(cons(ele, rest), ys), zs) == append(cons(ele, rest), append(ys, zs))
+            fixes i: int32u;
+            fixes m: Map<int32u, Option<T> >;
+            fixes zs: Option<T>;
+            fixes val: T;
+            assumes some(val) == get(i, m);
+            shows some(val) == zs
         }
         """
-        res_states = os_tactics.Induction(os_tactics.InductionParam("xs", []), tuple()).exec(thy, state)
+
+        res_states = os_tactics.Cases(parse_term(thy, var_ctxt, "get(i, m)")).exec(thy, state)
         self.assertEqual(res_states.num_unsolved(), 2)
         assert isinstance(res_states, os_tactics.CaseProofState)
-        self.assertEqual(res_states.cases[0][2], os_parser.parse_proof_state(
-            thy, append_assoc_nil))
-        self.assertEqual(res_states.cases[1][2], os_parser.parse_proof_state(
-            thy, append_assoc_cons))
+        self.assertEqual(res_states.cases[0][2], parse_proof_state(thy, state_none))
+        self.assertEqual(res_states.cases[1][2], parse_proof_state(thy, state_some))
+
+    def testCasesBool(self):
+        thy = basic_thy
+
+        state = """
+        state {
+            fixes x: int32u;
+            shows x * x >= 0
+        }
+        """
+        state = parse_proof_state(thy, state)
+        var_ctxt = state.get_var_context()
+
+        state_true = """
+        state {
+            fixes x: int32u;
+            assumes x >= 0;
+            shows x * x >= 0
+        }
+        """
+
+        state_false = """
+        state {
+            fixes x: int32u;
+            assumes x < 0;
+            shows x * x >= 0
+        }
+        """
+        res_states = os_tactics.Cases(parse_term(thy, var_ctxt, "x >= 0")).exec(thy, state)
+        self.assertEqual(res_states.num_unsolved(), 2)
+        assert isinstance(res_states, os_tactics.CaseProofState)
+        self.assertEqual(res_states.cases[0][2], parse_proof_state(thy, state_true))
+        self.assertEqual(res_states.cases[1][2], parse_proof_state(thy, state_false))
+
+    def testModuloOp(self):
+        thy = basic_thy
+        state = parse_proof_state(
+            thy, """state {
+                fixes x: int32;
+                fixes y: int32;
+                assumes x == 10;
+                assumes y == x % 3;
+                shows y == 1   
+            }
+            """
+        )
+        res = osverify.os_seq.SeqAuto().exec(thy, state)
+        self.assertEqual(res.num_unsolved(), 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,206 +1,21 @@
-from typing import Dict, List, Iterable, Optional, Tuple
+from typing import Iterable, Callable
+import json
 
 from osverify import os_util
 from osverify import os_struct
 from osverify import os_theory
+from osverify.os_theory import OSTheory
 from osverify import os_query
+from osverify.os_query import Assumes, Shows
+from osverify.os_proofstate import AbstractProofState, ProofState, CaseProofState, \
+    IndexProofState, EmptyProofState, AssertProofState
 from osverify import os_term
-from osverify.os_term import OSTerm, OSVar
+from osverify.os_term import OSTerm, OSVar, Transformer
 from osverify import os_match
 from osverify.os_util import indent
 from osverify import os_simplify
 from osverify import os_z3wrapper
-from osverify import os_model
-
-class AbstractProofState:
-    """Base class of proof states."""
-    def num_unsolved(self) -> int:
-        """Return the number of unsolved subgoals."""
-        raise NotImplementedError("num_unsolved: %s" % type(self))
-
-class EmptyProofState(AbstractProofState):
-    """Corresponds to a proof state that is already resolved."""
-    def __init__(self):
-        pass
-
-    def __str__(self):
-        return "()"
-    
-    def num_unsolved(self) -> int:
-        return 0
-
-class CaseProofState(AbstractProofState):
-    """Corresponds to proof states distinguished by datatype cases.
-    
-    Each case is specified constructor name, list of arguments to the
-    constructor, and the resulting proof state. Arguments to the
-    constructor are new names that can appear in the corresponding
-    proof state.
-
-    Attributes
-    ----------
-    cases : Tuple[Tuple[str, Tuple[OSVar], AbstractProofState]]
-        list of cases, each case is a triple (constr_name, params, state)
-
-    """
-    def __init__(self, cases: Iterable[Tuple[str, Tuple[OSVar], AbstractProofState]]):
-        self.cases = tuple(cases)
-
-    def __str__(self):
-        res = ""
-        first = True
-        for constr_name, params, state in self.cases:
-            if state.num_unsolved() > 0:
-                if not first:
-                    res += "\n"
-                res += constr_name
-                if params:
-                    res += "(%s)" % (", ".join(str(param) for param in params))
-                res += " {\n"
-                res += indent(str(state)) + "\n"
-                res += "}"
-                first = False
-        return res
-    
-    def num_unsolved(self) -> int:
-        res = 0
-        for _, _, state in self.cases:
-            res += state.num_unsolved()
-        return res
-
-class IndexProofState(AbstractProofState):
-    """Corresponding to proof states distinguished by index.
-    
-    The cases are distinguished by an 1-based integer index.
-
-    Attributes
-    ----------
-    cases : Tuple[AbstractProofState]
-        list of cases, with indices starting at 1    
-
-    """
-    def __init__(self, cases: Iterable[AbstractProofState]):
-        self.cases = tuple(cases)
-
-    def __str__(self):
-        res = ""
-        first = True
-        for i, state in enumerate(self.cases):
-            if state.num_unsolved() > 0:
-                if not first:
-                    res += "\n"
-                res += "%s: {\n" % (i + 1)
-                res += indent(str(state)) + "\n"
-                res += "}"
-                first = False
-        return res
-    
-    def num_unsolved(self) -> int:
-        res = 0
-        for state in self.cases:
-            res += state.num_unsolved()
-        return res
-
-class AssertProofState(AbstractProofState):
-    """Proving and then using an assertion.
-
-    This construct split the proof into two parts: first for asserting some
-    proposition, and second for making use of that proposition (for example
-    by putting it among the assumptions, but there are other possibilities).
-
-    Attributes
-    ----------
-    assert_prop : OSTerm
-        proposition to be asserted
-    assert_case : AbstractProofState
-        proof state for showing the asserted proposition
-    remain_case : AbstractProofState
-        proof state assuming the asserted proposition
-
-    """
-    def __init__(self, assert_prop: OSTerm, assert_case: AbstractProofState,
-                 remain_case: AbstractProofState):
-        self.assert_prop = assert_prop
-        self.assert_case = assert_case
-        self.remain_case = remain_case
-
-    def __str__(self):
-        res = ""
-        first = True
-        if self.assert_case.num_unsolved() > 0:
-            res += "assert %s: {" % self.assert_prop
-            res += indent(str(self.assert_case)) + "\n"
-            res += "}"
-            first = False
-        if self.remain_case.num_unsolved() > 0:
-            if not first:
-                res += "\n"
-            res += str(self.remain_case)
-        return res
-    
-    def num_unsolved(self) -> int:
-        return self.assert_case.num_unsolved() + self.remain_case.num_unsolved()
-
-class ProofState(AbstractProofState):
-    """Represents the intermediate state during a proof.
-    
-    Each proof state is given by list of type parameters, fixed variables,
-    assumptions and conclusion (goal).
-
-    Proof states are immutable. Tactics should return new proof states
-    rather than modifying their inputs.
-
-    Attributes
-    ----------
-    type_params : Tuple[str]
-        list of type parameters
-    fixes : Tuple[OSVar]
-        list of fixed variables
-    assumes : Tuple[Tuple[str, OSTerm]]
-        list of assumptions, each with optional name (default to empty string)
-    concl : OSTerm
-        current proof goal
-    fixes_map : Dict[str, OSType]
-        mapping from variable names to their type
-    
-    """
-    def __init__(self, type_params: Iterable[str],
-                 fixes: Iterable[OSVar],
-                 assumes: Iterable[Tuple[str, OSTerm]],
-                 concl: OSTerm):
-        self.type_params = tuple(type_params)
-        self.fixes = tuple(fixes)
-        self.assumes = tuple(assumes)
-        self.concl = concl
-        self.fixes_map = dict((fix.name, fix.type) for fix in self.fixes)
-        self.assume_map = dict((name, assume) for name, assume in self.assumes if name != "")
-
-    def __str__(self):
-        res = ""
-        for type_param in self.type_params:
-            res += "type %s" % type_param + '\n'
-        for var in self.fixes:
-            res += "fix %s: %s" % (var.name, var.type) + '\n'
-        for name, assume in self.assumes:
-            if name:
-                res += "assume %s: %s" % (name, assume) + '\n'
-            else:
-                res += "assume %s" % assume + '\n'
-        res += "prove %s" % self.concl
-        return res
-    
-    def num_unsolved(self) -> int:
-        return 1
-    
-    def __eq__(self, other):
-        return isinstance(other, ProofState) and self.type_params == other.type_params and \
-            self.fixes == other.fixes and self.assumes == other.assumes and self.concl == other.concl
-
-    def get_context(self, thy: os_theory.OSTheory) -> os_theory.OSContext:
-        ctxt = os_theory.OSContext(thy)
-        ctxt.type_params = list(self.type_params)
-        ctxt.var_decls = self.fixes_map
-        return ctxt
+from osverify.graph import ClassificationGraph
 
 
 class TacticException(Exception):
@@ -219,9 +34,10 @@ class Tactic:
     indicated by raising TacticException.
 
     """
-    def exec(self, thy: os_theory.OSTheory, state: AbstractProofState) -> AbstractProofState:
+    def exec(self, thy: OSTheory, state: ProofState) -> AbstractProofState:
         """Execute the tactic on the given state."""
         raise NotImplementedError
+
 
 class TacticBranch:
     """Base class for tactic branches."""
@@ -229,11 +45,16 @@ class TacticBranch:
     # Tactic for the branch
     tactic : Tactic
 
+
 class TacticBranchCase(TacticBranch):
-    """Tactic branch corresponding to a datatype case
+    """Tactic branch corresponding to branches of a datatype.
     
-    The list of parameters is introduced, and may be used in the
-    ensuing tactic.
+    Each case corresponds to a branch of the datatype. The list of
+    parameters introduced by the branch is recorded, and may be used
+    in the ensuing tactic.
+
+    One special case is case analysis on a boolean expression. Then
+    the two branches are "true" and "false", respectively.
     
     """
     def __init__(self, constr_name: str, params: Iterable[str], tactic: Tactic):
@@ -252,6 +73,7 @@ class TacticBranchCase(TacticBranch):
             return "TacticBranchCase(%s, [%s], %s)" % (self.constr_name, ", ".join(self.params), repr(self.tactic))
         else:
             return "TacticBranchCase(%s, %s)" % (self.constr_name, repr(self.tactic))
+
 
 class TacticBranchIndex(TacticBranch):
     """Tactic branch corresponding to index.
@@ -290,9 +112,16 @@ class Skip(Tactic):
     def __str__(self):
         return "skip"
 
-    def exec(self, thy: os_theory.OSTheory, state: AbstractProofState) -> AbstractProofState:
+    def exec(self, thy: OSTheory, state: AbstractProofState) -> AbstractProofState:
         return state
-    
+
+
+class Admit(Tactic):
+    """Skip the current subgoal. For debugging only."""
+    def exec(self, thy: OSTheory, state: ProofState) -> EmptyProofState:
+        return EmptyProofState()
+
+
 class Then(Tactic):
     """Perform one tactic followed by another.
     
@@ -312,12 +141,13 @@ class Then(Tactic):
     def __repr__(self):
         return "Then(%s, %s)" % (self.tactic1, self.tactic2)
     
-    def exec(self, thy: os_theory.OSTheory, state: AbstractProofState) -> AbstractProofState:
+    def exec(self, thy: OSTheory, state: ProofState) -> AbstractProofState:
         state2 = self.tactic1.exec(thy, state)
 
         if isinstance(state2, ProofState):
             return self.tactic2.exec(thy, state2)
         elif isinstance(state2, AssertProofState):
+            # Handles the case assert (prop);; tac2
             return AssertProofState(state2.assert_prop, state2.assert_case,
                                     self.tactic2.exec(thy, state2.remain_case))
         else:
@@ -341,8 +171,8 @@ class ThenSplit(Tactic):
         self.cases = tuple(cases)
 
         # Form cases_map, index_map and default_tac
-        self.cases_map: Dict[str, TacticBranchCase] = dict()
-        self.index_map: Dict[int, TacticBranchIndex] = dict()
+        self.cases_map: dict[str, TacticBranchCase] = dict()
+        self.index_map: dict[int, TacticBranchIndex] = dict()
         self.default_tac: Tactic = Skip()
         for case in self.cases:
             if isinstance(case, TacticBranchCase):
@@ -354,7 +184,7 @@ class ThenSplit(Tactic):
             else:
                 raise AssertionError("ThenSplit: %s" % type(case))
 
-    def exec(self, thy: os_theory.OSTheory, state: AbstractProofState) -> AbstractProofState:
+    def exec(self, thy: OSTheory, state: ProofState) -> AbstractProofState:
         state2 = self.tactic1.exec(thy, state)
 
         if isinstance(state2, ProofState):
@@ -388,77 +218,146 @@ class Auto(Tactic):
     
     If call to SMT is successful, return empty state indicating all goals
     are resolved. Otherwise raise exception.
-
-    Attributes
-    ----------
-    thm_spec : Tuple[TheoremSpec]
-        List of theorems that can be used.
     
     """
-    def __init__(self, *, thm_spec: Iterable[os_theory.TheoremSpec] = tuple()):
-        self.thm_spec = tuple(thm_spec)
+    def __init__(self, *, verbose=False):
+        self.verbose = verbose
 
     def __str__(self):
-        if self.thm_spec:
-            return "auto(%s)" % ", ".join(str(spec) for spec in self.thm_spec)
-        else:
-            return "auto"
+        return "auto"
 
     def __repr__(self):
-        return "Auto(%s)" % ", ".join(repr(spec) for spec in self.thm_spec)
+        return "Auto()"
 
-    def exec(self, thy: os_theory.OSTheory, state: AbstractProofState) -> AbstractProofState:
-        if not isinstance(state, ProofState):
-            raise TacticException("auto: not applied to singleton")
+    def exec(self, thy: OSTheory, state: ProofState) -> EmptyProofState:
+        if self.verbose:
+            print(f"solve {len(state.assumes)} facts, size = {len(str(state))}")
 
-        res = os_z3wrapper.solve(thy, [assume for _, assume in state.assumes],
-                                 state.concl, thm_spec=self.thm_spec)
+        # Check that all quantifiers have been removed
+        for assume in state.assumes:
+            if isinstance(assume.prop, (os_term.OSQuant, os_term.OSQuantIn)):
+                raise TacticException(f"auto: proof state still contains quantifier {assume.prop}")
+        if isinstance(state.concl.prop, (os_term.OSQuant, os_term.OSQuantIn)):
+            raise TacticException(f"auto: proof state still contains quantifier {state.concl}")
+
+        # Export json
+        json_data = state.export_meta()
+        with open("app/meta-viewer/src/assets/meta.json", "w", encoding='utf-8') as file:
+            file.write(json.dumps(json_data, indent=4))
+
+        # Apply Z3 solve
+        assumes = []
+        for assume in state.assumes:
+            if not os_theory.is_defining_eq(thy, assume.prop):
+                assumes.append(assume.prop)
+        
+        res = os_z3wrapper.solve_impl(thy, assumes, state.concl.prop)
         if isinstance(res, os_z3wrapper.UnsatResult):
             return EmptyProofState()
         elif isinstance(res, os_z3wrapper.ModelResult):
-            print('--- When proving ---')
-            print(state.concl)
-            model = os_z3wrapper.convert_model(thy, state.type_params, state.fixes, res.model, verbose=True)
-            print("--- Converted model ---")
-            print(model)
-            os_model.diagnose_query(thy, [assume for _, assume in state.assumes], state.concl, model)
-            print("--- list of abstract functions ---")
-            for func, ty in res.funcs:
-                print("%s: %s" % (func, ty))
-            # os_z3wrapper.diagnose_diff(thy, state.concl, res.model, res.ctxt, model)
-            raise TacticException("Z3 is unable to prove goal")
+            raise os_z3wrapper.SMTException(res.z3_model, state, res.convert_ctxt)
         else:
-            raise TacticException("Z3 is unable to prove goal")
+            raise NotImplementedError(f"Z3 solve returns: {type(res)}")
 
-class Simplify(Tactic):
-    """Simplify assumption and conclusion of a query."""
-    def __init__(self):
-        pass
+def transform_defining_eq(eq: OSTerm, var_ctxt: os_term.VarContext,
+                          transformer: Transformer) -> OSTerm:
+    """Apply transformer to defining equation.
+    
+    Given equation of the form `lhs == rhs`, where `lhs` is an
+    atomic term, apply transformer to each index in `lhs` as well as
+    to `rhs`.
 
-    def exec(self, thy: os_theory.OSTheory, state: AbstractProofState) -> AbstractProofState:
-        if not isinstance(state, ProofState):
-            raise TacticException("simplify: not applied to singleton")
+    """
+    return os_term.eq(eq.lhs, eq.rhs.transform(var_ctxt, transformer))
 
+class ApplyTransformer(Tactic):
+    """Apply transformer to assumptions and goal of the state.
+    
+    Note defining equations are skipped in the rewriting.
+
+    """
+    def __init__(self, transformer: Transformer):
+        self.transformer = transformer
+
+    def exec(self, thy: OSTheory, state: ProofState) -> ProofState:
+        var_ctxt = state.get_var_context()
+        assumes = []
+        for assume in state.assumes:
+            if os_theory.is_defining_eq(thy, assume.prop):
+                assumes.append(Assumes(transform_defining_eq(assume.prop, var_ctxt, self.transformer),
+                                       generation=assume.generation,
+                                       conds=assume.conds,
+                                       name=assume.name, meta=assume.meta))
+            else:
+                assumes.append(Assumes(assume.prop.transform(var_ctxt, self.transformer),
+                                       generation=assume.generation,
+                                       conds=assume.conds,
+                                       name=assume.name, meta=assume.meta))
+        new_concl = Shows(state.concl.prop.transform(var_ctxt, self.transformer),
+                          meta=state.concl.meta)
         return ProofState(
             state.type_params,
             state.fixes,
-            [(name, os_simplify.simplify(thy, assume)) for name, assume in state.assumes],
-            os_simplify.simplify(thy, state.concl)
+            assumes,
+            new_concl,
+            graph=state.graph
         )
+
+class ApplyTransformerThy(Tactic):
+    """Apply a transformer that takes theory as an argument.
+    
+    As with `ApplyTransformer`, the defining equations are skipped in
+    the rewriting.
+    
+    """
+    def __init__(self, transformer: Callable[[OSTheory], Transformer]):
+        self.transformer = transformer
+
+    def __str__(self):
+        transformer = self.transformer(OSTheory())
+        return f"ApplyTransformerThy({transformer})"
+
+    def exec(self, thy: OSTheory, state: ProofState) -> ProofState:
+        transformer = self.transformer(thy)
+        var_ctxt = state.get_var_context()
+        assumes = []
+        for assume in state.assumes:
+            if os_theory.is_defining_eq(thy, assume.prop):
+                assumes.append(Assumes(transform_defining_eq(assume.prop, var_ctxt, transformer),
+                                       generation=assume.generation,
+                                       conds=assume.conds,
+                                       name=assume.name, meta=assume.meta))
+            else:
+                assumes.append(Assumes(assume.prop.transform(var_ctxt, transformer),
+                                       generation=assume.generation,
+                                       conds=assume.conds,
+                                       name=assume.name, meta=assume.meta))
+        new_concl = Shows(state.concl.prop.transform(var_ctxt, transformer),
+                          meta=state.concl.meta)
+        return ProofState(
+            state.type_params,
+            state.fixes,
+            assumes,
+            new_concl,
+            graph=state.graph
+        )
+
 
 class Exists(Tactic):
     """Supply witness to existence goal by hand.
-    
+
+    Given the current goal in the form of exists quantifier, instantiate
+    the exists quantifier using supplied terms.
+
     """
     def __init__(self, exprs: Iterable[OSTerm]):
         self.exprs = exprs
 
-    def exec(self, thy: os_theory.OSTheory, state: AbstractProofState) -> AbstractProofState:
-        if not isinstance(state, ProofState):
-            raise TacticException("exists: not applied to singleton")
+    def exec(self, thy: OSTheory, state: ProofState) -> AbstractProofState:
+        var_ctxt = state.get_var_context()
 
         # Extract existential variable and body statement
-        vars, body = os_term.strip_exists(state.concl)
+        vars, body, _ = os_term.strip_exists(var_ctxt, state.concl.prop)
 
         inst = dict()
         for var, expr in zip(vars, self.exprs):
@@ -467,19 +366,63 @@ class Exists(Tactic):
                     var.name, var.type, expr.type))
             inst[var.name] = expr
         
-        body_inst = body.subst(inst)
+        body = body.subst(inst)
         new_cases = list()
-        shows = os_term.split_conj(body_inst)
+        shows = os_term.split_conj(body)
         for show in shows:
             # Form the goal
             new_cases.append(ProofState(
                 type_params=state.type_params,
                 fixes=state.fixes,
                 assumes=state.assumes,
-                concl=show
+                concl=Shows(show),
+                graph=state.graph
             ))
 
-        return IndexProofState(new_cases)
+        if len(new_cases) == 1:
+            return new_cases[0]
+        else:
+            return IndexProofState(new_cases)
+
+class Specialize(Tactic):
+    """Specialize a forall fact by hand.
+    
+    Given a fact in the form of forall quantifier, instantiate the
+    forall quantifier using supplied terms.
+
+    """
+    def __init__(self, assume_name: str, exprs: Iterable[OSTerm]):
+        self.assume_name = assume_name
+        self.exprs = exprs
+
+    def exec(self, thy: OSTheory, state: ProofState) -> ProofState:
+        var_ctxt = state.get_var_context()
+
+        assumes = list()
+        if self.assume_name not in state.assume_map:
+            raise TacticException(f"Specialize: fact {self.assume_name} not found")
+        for assume in state.assumes:
+            if assume.name == self.assume_name:
+                vars, body, _ = os_term.strip_forall(var_ctxt, assume.prop)
+                if len(vars) != len(self.exprs):
+                    raise TacticException(
+                        f"Specialize: expected {len(vars)} expressions, provided {len(self.exprs)}")
+                inst: dict[str, OSTerm] = dict()
+                for var, expr in zip(vars, self.exprs):
+                    inst[var.name] = expr
+                body = body.subst(inst)
+                assumes.append(Assumes(body, generation=assume.generation, conds=assume.conds,
+                                       name=assume.name))
+            else:
+                assumes.append(assume)
+
+        return ProofState(
+            type_params=state.type_params,
+            fixes=state.fixes,
+            assumes=assumes,
+            concl=state.concl,
+            graph=state.graph,
+        )
 
 class Skolemize(Tactic):
     """Skolemize quantifiers.
@@ -493,9 +436,8 @@ class Skolemize(Tactic):
         self.name = name
         self.vars = vars
 
-    def exec(self, thy: os_theory.OSTheory, state: AbstractProofState) -> AbstractProofState:
-        if not isinstance(state, ProofState):
-            raise TacticException("skolemize: not applied to singleton")
+    def exec(self, thy: OSTheory, state: ProofState) -> ProofState:
+        var_ctxt = state.get_var_context()
 
         # Obtain list of existing variable names
         fixes_names = set(state.fixes_map.keys())
@@ -504,9 +446,9 @@ class Skolemize(Tactic):
         # and universal quantifiers in the conclusion
         new_fixes = list()
         assumes = list()
-        for name, assume in state.assumes:
-            if name == self.name:
-                vars, body = os_term.strip_exists(assume)
+        for assume in state.assumes:
+            if assume.name == self.name:
+                vars, body, _ = os_term.strip_exists(var_ctxt, assume.prop)
                 if len(vars) != len(self.vars):
                     raise TacticException("skolemize: expected %s variable names, provided %s." % (
                         len(vars), len(self.vars)
@@ -522,15 +464,53 @@ class Skolemize(Tactic):
                     inst[var.name] = new_var
                     new_fixes.append(new_var)
                     fixes_names.add(new_var.name)
-                assumes.append((name, body.subst(inst)))
+                assumes.append(Assumes(body.subst(inst), generation=assume.generation,
+                                       conds=assume.conds, name=assume.name))
             else:
-                assumes.append((name, assume))
+                assumes.append(Assumes(assume.prop, generation=assume.generation,
+                                       conds=assume.conds, name=assume.name))
 
         return ProofState(
             type_params=state.type_params,
             fixes=tuple(list(state.fixes) + new_fixes),
             assumes=assumes,
-            concl=state.concl
+            concl=state.concl,
+            graph=state.graph
+        )
+
+
+class Intros(Tactic):
+    """Introduce forall-quantifiers in the conclusion.
+
+    Convert variables bounded by universal quantifiers into fixed free variables.
+    Names for the new variables must be provided. 
+
+    """
+    def __init__(self, var_names: Iterable[str] = tuple()):
+        self.var_names = var_names
+
+    def exec(self, thy: OSTheory, state: ProofState) -> ProofState:
+        if not os_term.is_forall(state.concl.prop):
+            if len(self.var_names) > 0:
+                raise TacticException("Intros: conclusion is not in forall form.")
+            else:
+                return state
+
+        var_ctxt = state.get_var_context()
+        try:
+            new_vars, body, _ = os_term.strip_forall(
+                var_ctxt, state.concl.prop, var_names=self.var_names)
+        except os_term.OSTermException as e:
+            raise TacticException(e.msg)
+
+        As, C = os_term.strip_implies(body)
+        As_t = [Assumes(assum, generation=0, conds=tuple()) for assum in As]
+        return ProofState(
+            type_params=state.type_params,
+            fixes=tuple(state.fixes + new_vars),
+            assumes=state.assumes + tuple(As_t),
+            concl=Shows(C),
+            graph=state.graph
         )
 
 
@@ -558,16 +538,14 @@ class Assert(Tactic):
             raise AssertionError("assert: input expression is not of boolean type")
         self.tactic = tactic
 
-    def exec(self, thy: os_theory.OSTheory, state: AbstractProofState) -> AbstractProofState:
-        if not isinstance(state, ProofState):
-            raise TacticException("assert: not applied to singleton")
-
+    def exec(self, thy: OSTheory, state: ProofState) -> AssertProofState:
         # First prove assertion
         assert_state = ProofState(
             type_params=state.type_params,
             fixes=state.fixes,
             assumes=state.assumes,
-            concl=self.expr
+            concl=Shows(self.expr),
+            graph=state.graph
         )
         assert_state2 = self.tactic.exec(thy, assert_state)
 
@@ -575,8 +553,9 @@ class Assert(Tactic):
         remain_state = ProofState(
             type_params=state.type_params,
             fixes=state.fixes,
-            assumes=state.assumes + ((self.name, self.expr),),
-            concl=state.concl
+            assumes=state.assumes + (Assumes(self.expr, generation=0, conds=tuple(), name=self.name),),
+            concl=state.concl,
+            graph=state.graph
         )
         return AssertProofState(self.expr, assert_state2, remain_state)
 
@@ -601,27 +580,28 @@ class Change(Tactic):
             raise AssertionError("change: input expression is not equality")
         self.tactic = tactic
 
-    def exec(self, thy: os_theory.OSTheory, state: AbstractProofState) -> AbstractProofState:
-        if not isinstance(state, ProofState):
-            raise TacticException("change: not applied to singleton")
+    def exec(self, thy: OSTheory, state: ProofState) -> AssertProofState:
+        var_ctxt = state.get_var_context()
 
         # First prove assertion
         assert_state = ProofState(
             type_params=state.type_params,
             fixes=state.fixes,
             assumes=state.assumes,
-            concl=self.expr
+            concl=Shows(self.expr),
+            graph=state.graph
         )
         assert_state2 = self.tactic.exec(thy, assert_state)
 
         # Now rewrite using the new equality
-        concl = state.concl.apply_subterm(
-            lambda t: os_simplify.rewrite(thy, self.expr, t))
+        concl = Shows(state.concl.prop.transform(
+            var_ctxt, os_simplify.ReplaceTerm(self.expr.lhs, self.expr.rhs)))
         remain_state = ProofState(
             type_params=state.type_params,
             fixes=state.fixes,
             assumes=state.assumes,
-            concl=concl            
+            concl=concl,
+            graph=state.graph
         )
         return AssertProofState(self.expr, assert_state2, remain_state)
 
@@ -630,12 +610,9 @@ class Assumption(Tactic):
     def __init__(self):
         pass
 
-    def exec(self, thy: os_theory.OSTheory, state: AbstractProofState) -> AbstractProofState:
-        if not isinstance(state, ProofState):
-            raise TacticException("assumption: not applied to singleton")
-
-        for _, assume in state.assumes:
-            if assume == state.concl:
+    def exec(self, thy: OSTheory, state: ProofState) -> EmptyProofState:
+        for assume in state.assumes:
+            if assume.prop == state.concl.prop:
                 return EmptyProofState()
         raise TacticException("Assumption: not found")
 
@@ -652,7 +629,7 @@ class SplitConj(Tactic):
     ----------
     name : str
         name of the assumption to be split
-    new_names : Tuple[str]
+    new_names : tuple[str]
         name of the new assumptions
 
     """
@@ -660,27 +637,55 @@ class SplitConj(Tactic):
         self.name = name
         self.new_names = tuple(new_names)
 
-    def exec(self, thy: os_theory.OSTheory, state: AbstractProofState) -> AbstractProofState:
-        if not isinstance(state, ProofState):
-            raise TacticException("split_conj: not applied to singleton")
-
+    def exec(self, thy: OSTheory, state: ProofState) -> ProofState:
         assumes = list()
-        for name, assume in state.assumes:
-            if name == self.name:
-                conjs = os_term.split_conj(assume)
+        if self.name not in state.assume_map:
+            raise TacticException("SplitConj: fact %s not found" % self.name)
+        for assume in state.assumes:
+            if assume.name == self.name:
+                conjs = os_term.split_conj(assume.prop)
                 if len(conjs) != len(self.new_names):
                     raise TacticException("SplitConj: expected %s names, provided %s." % (
                         len(conjs), len(self.new_names)))
                 for new_name, conj in zip(self.new_names, conjs):
-                    assumes.append((new_name, conj))
+                    assumes.append(Assumes(conj, generation=assume.generation,
+                                           conds=assume.conds, name=new_name))
             else:
-                assumes.append((name, assume))
+                assumes.append(assume)
         return ProofState(
             type_params=state.type_params,
             fixes=state.fixes,
             assumes=assumes,
-            concl=state.concl
+            concl=state.concl,
+            graph=state.graph
         )
+    
+class SplitGoal(Tactic):
+    """Split the conjunctive goal into several parts.
+    
+    This results in an IndexProofState, where each index corresponds to
+    one of the conjuncts.
+    
+    """
+    def __init__(self):
+        pass
+
+    def exec(self, thy: OSTheory, state: ProofState) -> IndexProofState:
+        if not os_term.is_conj(state.concl.prop):
+            raise TacticException("SplitGoal: goal is not a conjunction")
+        
+        conjs = os_term.split_conj(state.concl.prop)
+        new_cases = list()
+        for conj in conjs:
+            new_cases.append(ProofState(
+                type_params=state.type_params,
+                fixes=state.fixes,
+                assumes=state.assumes,
+                concl=Shows(conj),
+                graph=state.graph
+            ))
+
+        return IndexProofState(new_cases)
 
 class MatchShow(Tactic):
     """Match existential goal statement with one of the assumptions.
@@ -702,19 +707,19 @@ class MatchShow(Tactic):
     def __init__(self, name: str):
         self.name = name
 
-    def exec(self, thy: os_theory.OSTheory, state: AbstractProofState) -> AbstractProofState:
-        if not isinstance(state, ProofState):
-            raise TacticException("MatchShow: not applied to singleton")
+    def exec(self, thy: OSTheory, state: ProofState) -> IndexProofState:
+        var_ctxt = state.get_var_context()
 
         if self.name not in state.assume_map:
             raise TacticException("MatchShow: name %s not found" % self.name)
         assume = state.assume_map[self.name]
 
-        if not (isinstance(state.concl, os_term.OSQuant) and state.concl.quantifier == "exists"):
+        if not (isinstance(state.concl.prop, os_term.OSQuant) \
+                and state.concl.prop.quantifier == "exists"):
             raise TacticException("MatchShow: goal not in exists form.")
 
         # Extract existential variable and body statement
-        vars, body = os_term.strip_exists(state.concl)
+        vars, body, _ = os_term.strip_exists(var_ctxt, state.concl.prop)
 
         # Replace variables by schematic variables
         inst = dict()
@@ -727,7 +732,7 @@ class MatchShow(Tactic):
         # match, return the resulting goals.
         for pat in body_pats:
             tyinst, inst = dict(), dict()
-            if os_match.match(thy, pat, assume, tyinst, inst):
+            if os_match.match(pat, assume, tyinst, inst):
                 # print("--- instantiation ---")
                 # print("pat =", pat)
                 # print("assume =", assume)
@@ -750,7 +755,8 @@ class MatchShow(Tactic):
                             type_params=state.type_params,
                             fixes=state.fixes,
                             assumes=state.assumes,
-                            concl=show
+                            concl=Shows(show),
+                            graph=state.graph
                         ))
 
                     return IndexProofState(new_cases)
@@ -765,7 +771,7 @@ class ApplyParam:
     ----------
     thm_name : str
         Name of the theorem to be applied.
-    facts : Tuple[str], default to ()
+    facts : tuple[str], default to ()
         List of assumptions that also need to be matched.
 
     """
@@ -785,21 +791,20 @@ class ApplyTheorem(Tactic):
     def __init__(self, param: ApplyParam):
         self.param = param
 
-    def exec(self, thy: os_theory.OSTheory, state: AbstractProofState) -> AbstractProofState:
-        if not isinstance(state, ProofState):
-            raise TacticException("ApplyTheorem: not applied to singleton")
-
+    def exec(self, thy: OSTheory, state: ProofState) -> AbstractProofState:
         if self.param.thm_name in thy.theorems:
             thm = thy.get_sch_theorem(self.param.thm_name)
             assumes, concl = os_term.strip_implies(thm)
         elif self.param.thm_name in state.assume_map:
             assume = state.assume_map[self.param.thm_name]
 
-            if not (isinstance(assume, os_term.OSQuant) and assume.quantifier == "forall"):
-                raise TacticException("ApplyTheorem: assumption %s is not in forall form" % self.name)
+            if not (os_term.is_forall(assume)):
+                raise TacticException(
+                    "ApplyTheorem: assumption %s is not in forall form" % self.param.thm_name)
 
             # Extract forall variable and body statement
-            vars, body = os_term.strip_forall(assume)
+            var_ctxt = state.get_var_context()
+            vars, body, _ = os_term.strip_forall(var_ctxt, assume)
 
             # Replace variables by schematic variables
             inst = dict()
@@ -812,8 +817,8 @@ class ApplyTheorem(Tactic):
 
         # Match conclusion of theorem with current goal
         tyinst, inst = dict(), dict()
-        if not os_match.match(thy, concl, state.concl, tyinst, inst):
-            raise TacticException("ApplyTheorem: match %s with %s failed" % (concl, state.concl))
+        if not os_match.match(concl, state.concl.prop, tyinst, inst):
+            raise TacticException("ApplyTheorem: match %s with %s failed" % (concl, state.concl.prop))
         
         # Match assumptions of the theorem with the existing facts
         for i, fact in enumerate(self.param.facts):
@@ -821,7 +826,7 @@ class ApplyTheorem(Tactic):
                 continue  # skip assumption
             elif fact not in state.assume_map:
                 raise TacticException("ApplyTheorem: fact %s not found" % fact)
-            elif not os_match.match(thy, assumes[i], state.assume_map[fact], tyinst, inst):
+            elif not os_match.match(assumes[i], state.assume_map[fact], tyinst, inst):
                 raise TacticException("ApplyTheorem: match %s with %s failed" % (
                     assumes[i], state.assume_map[fact]))
 
@@ -845,7 +850,8 @@ class ApplyTheorem(Tactic):
                     type_params=state.type_params,
                     fixes=state.fixes,
                     assumes=state.assumes,
-                    concl=new_concl
+                    concl=Shows(new_concl),
+                    graph=state.graph
                 ))
         
         if len(new_cases) == 0:
@@ -856,10 +862,10 @@ class ApplyTheorem(Tactic):
             return IndexProofState(new_cases)
 
 class DefineVar(Tactic):
-    """Define new variable u for a given expression t.
+    """Define new variable `u` for a given expression `t`.
 
-    This tactic adds equation u == t to the list of assumptions,
-    and replaces t by u in the other parts of the state.
+    This tactic adds equation `u == t` to the list of assumptions,
+    and replaces `t` by `u` in the other parts of the state.
     
     """
     def __init__(self, var_name: str, expr: OSTerm):
@@ -872,48 +878,130 @@ class DefineVar(Tactic):
     def __repr__(self):
         return "DefineVar(%s, %s)" % (self.var_name, self.expr)
 
-    def exec(self, thy: os_theory.OSTheory, state: AbstractProofState) -> AbstractProofState:
-        if not isinstance(state, ProofState):
-            raise TacticException("DefineVar: not applied to singleton")
+    def exec(self, thy: OSTheory, state: ProofState) -> ProofState:
+        var_ctxt = state.get_var_context()
+        if var_ctxt.contains_var(self.var_name):
+            raise TacticException(f"DefineVar: variable {self.var_name} already used")
 
         new_var = OSVar(self.var_name, type=self.expr.type)
+        transformer = os_simplify.ReplaceTerm(self.expr, new_var)
 
-        def replace_term(expr: OSTerm) -> OSTerm:
-            return new_var if expr == self.expr else expr
+        assumes: list[Assumes] = list()
+        for assume in state.assumes:
+            new_assume = assume.prop.transform(var_ctxt, transformer)
+            assumes.append(Assumes(new_assume, generation=assume.generation,
+                                   conds=assume.conds, name=assume.name))
+        assumes.append(Assumes(os_term.eq(new_var, self.expr), generation=0, conds=tuple()))
 
-        assumes: List[Tuple[str, OSTerm]] = list()
-        for name, assume in state.assumes:
-            assumes.append((name, assume.apply_subterm(replace_term)))
-        assumes.append(("eq_%s" % self.var_name, os_term.OSOp("==", new_var, self.expr)))
-
+        new_concl = Shows(state.concl.prop.transform(var_ctxt, transformer))
         return ProofState(
             type_params=state.type_params,
             fixes=state.fixes + (new_var,),
             assumes=assumes,
-            concl=state.concl.apply_subterm(replace_term)
+            concl=new_concl,
+            graph=state.graph
         )
 
+
+class RewriteDefine(Tactic):
+    """Rewrite using defining equation.
+
+    This tactic rewrites using a defining equation `v = t`. Note
+    it is unnecessary for the lhs `v` to be a variable.
+
+    Attributes
+    ----------
+    name: str
+        Name of the defining equation.
+
+    """
+    def __init__(self, name: str):
+        self.name = name
+
+    def __str__(self):
+        return "rewrite define %s" % self.name
+
+    def __repr__(self):
+        return "RewriteDefine(%s)" % self.name
+
+    def exec(self, thy: OSTheory, state: ProofState) -> ProofState:
+        if self.name not in state.assume_map:
+            raise AssertionError("RewriteDefine: fact %s not found" % self.name)
+
+        eq = state.assume_map[self.name]
+        if not os_term.is_eq(eq):
+            raise AssertionError("RewriteDefine: fact %s is not an equality" % self.name)
+
+        if not os_term.is_atomic_term(eq.lhs):
+            raise AssertionError("RewriteDefine: lhs %s is not atomic" % eq.lhs)
+
+        var_ctxt = state.get_var_context()
+        transformer = os_simplify.ReplaceTerm(eq.lhs, eq.rhs)
+        assumes = []
+        for assume in state.assumes:
+            if assume.name == self.name:
+                assumes.append(assume)
+            else:
+                assumes.append(Assumes(assume.prop.transform(var_ctxt, transformer),
+                                       generation=assume.generation,
+                                       conds=assume.conds,
+                                       name=assume.name, meta=assume.meta))
+        
+        new_concl = Shows(state.concl.prop.transform(var_ctxt, transformer),
+                          meta=state.concl.meta)
+        
+        return ProofState(
+            type_params=state.type_params,
+            fixes=state.fixes,
+            assumes=assumes,
+            concl=new_concl,
+            graph=state.graph
+        )
+
+
+class Rewrite(Tactic):
+    """Rewrite using a theorem."""
+
+    def __init__(self, th_name: str):
+        self.th_name = th_name
+
+    def __str__(self):
+        return "rewrite %s" % self.th_name
+    
+    def __repr__(self):
+        return "Rewrite(%s)" % self.th_name
+    
+    def exec(self, thy: OSTheory, state: ProofState) -> AbstractProofState:
+        return ApplyTransformer(os_simplify.RewriteThm(thy, self.th_name)).exec(thy, state)
+
+
 class Cases(Tactic):
-    """Perform case analysis on the given query.
+    """Perform case analysis on an expression.
 
     Attributes
     ----------
     expr: OSTerm
-        Expression on which to perform case analysis. The type of this expression
-        should be a datatype.
-    cases : Tuple[TacticBranch]
-        List of tactics applied to each case of the datatype.
+        Expression on which to perform case analysis. The type of this
+        expression should be a datatype. Case analysis is performed on
+        the different branches of the datatype.
+    cases : tuple[TacticBranch]
+        List of tactics applied to each case of the datatype. Each element
+        of cases should either TacticBranchCase of TacticBranchDefault.
     default : Tactic
         Tactic for default cases.
-    cases_map : Dict[str, TacticBranchCase]
+    cases_map : dict[str, TacticBranchCase]
         Mapping from constructor name to corresponding tactic.
     default_tac : Tactic
         Tactic for the default case
 
     The procedure for case analysis on expression t is as follows:
 
+    - If t is a boolean expression, generate cases for true and false,
+      respectively. Simplify corresponding if-then-else expressions.
+
     - If t is already a variable, generate one case for each constructor
       for the type of t. For each case, replace t by the given constructor.
+      Simplify corresponding switch expressions.
 
     - If t is not a variable, pick a fresh variable u and add equation
       u = t to the list of assumptions. Then perform the above procedure
@@ -926,7 +1014,7 @@ class Cases(Tactic):
         self.cases = tuple(cases)
 
         # Form cases_map and default_tac
-        self.cases_map: Dict[str, TacticBranchCase] = dict()
+        self.cases_map: dict[str, TacticBranchCase] = dict()
         self.default_tac: Tactic = Skip()
         for case in self.cases:
             if isinstance(case, TacticBranchCase):
@@ -934,7 +1022,9 @@ class Cases(Tactic):
             elif isinstance(case, TacticBranchDefault):
                 self.default_tac = case.tactic
             else:
-                raise AssertionError
+                raise AssertionError(
+                    "Cases: each branch must be either TacticBranchCase "
+                    "or TacticBranchDefault")
 
     def __str__(self):
         res = "cases (%s) {" % self.expr
@@ -950,22 +1040,51 @@ class Cases(Tactic):
             return "Cases(%s, [%s])" % (
                 self.expr, ", ".join(str(case) for case in self.cases))
 
-    def exec(self, thy: os_theory.OSTheory, state: AbstractProofState) -> AbstractProofState:
-        if not isinstance(state, ProofState):
-            raise TacticException("Cases: not applied to singleton")
+    def exec(self, thy: OSTheory, state: ProofState) -> AbstractProofState:
+        # Type of the expression
+        var_type = self.expr.type
+
+        if var_type == os_struct.Bool:
+            # Special case: boolean
+            new_cases = list()
+
+            for case_name in ("true", "false"):
+                if case_name == "true":
+                    new_assume = self.expr
+                else:
+                    new_assume = os_term.get_negation(self.expr)
+
+                state2 = ProofState(
+                    type_params=state.type_params,
+                    fixes=state.fixes,
+                    assumes=state.assumes + (Assumes(new_assume, generation=0, conds=tuple()),),
+                    concl=state.concl,
+                    graph=state.graph
+                )
+
+                # Simplify corresponding if-then-else expressions
+                state2 = ApplyTransformer(
+                    os_simplify.SimplifyITE(new_assume)).exec(thy, state2)
+
+                if case_name in self.cases_map:
+                    tactic = self.cases_map[case_name].tactic
+                else:
+                    tactic = self.default_tac
+
+                new_cases.append((case_name, tuple(), tactic.exec(thy, state2)))
+            
+            return CaseProofState(new_cases)
 
         if isinstance(self.expr, OSVar):
             # Expression is already a variable
             var_name = self.expr.name
         else:
             # Create new variable name for the expression, and apply DefineVar
-            # tactic to replace expression by the variable throughout.
+            # tactic to replace expression by the variable throughout. Note
+            # the resulting variable u does not appear in the end-result.
             names = set(state.fixes_map.keys())
             var_name = os_util.variant_names(names, "u")
-            state = DefineVar(var_name, self.expr).exec(thy, state)[0]
-
-        # Type of the expression
-        var_type = os_theory.expand_type(thy, state.fixes_map[var_name])
+            state = DefineVar(var_name, self.expr).exec(thy, state)
 
         if not (isinstance(var_type, os_struct.OSHLevelType) and var_type.name in thy.datatypes):
             raise AssertionError("cases: expression %s has type %s is not datatype" % (self.expr, var_type))
@@ -1009,21 +1128,28 @@ class Cases(Tactic):
             # For each existing assumption, make the corresponding assumption
             # by substitution
             assumes = []
-            for name, assume in state.assumes:
+            for assume in state.assumes:
                 inst = dict()
                 inst[var_name] = os_term.OSFun(constr_name, *arg_list, type=var_type)
-                assumes.append((name, assume.subst(inst)))
+                assumes.append(Assumes(assume.prop.subst(inst), generation=assume.generation,
+                                       conds=assume.conds, name=assume.name))
 
             # Form the goal
             inst = dict()
             inst[var_name] = os_term.OSFun(constr_name, *arg_list, type=var_type)
-            concl = state.concl.subst(inst)
+            concl = Shows(state.concl.prop.subst(inst))
 
             state2 = ProofState(
                 type_params=state.type_params,
                 fixes=fixes,
                 assumes=assumes,
-                concl=concl)
+                concl=concl,
+                graph=state.graph
+            )
+
+            # Simplify corresponding switch expressions
+            state2 = ApplyTransformer(
+                os_simplify.SimplifySwitchOnConstructor(thy)).exec(thy, state2)
             
             if constr_name in self.cases_map:
                 tactic = self.cases_map[constr_name].tactic
@@ -1043,7 +1169,7 @@ class InductionParam:
     induct_var : str
         Variable on which to perform induction. The type of this variable
         should be a datatype.
-    arbitraries : Tuple[str]
+    arbitraries : tuple[str]
         List of generalized variables.
 
     """
@@ -1063,9 +1189,9 @@ class Induction(Tactic):
     Attributes
     ----------
     param : InductionParam
-    cases : Tuple[TacticBranch]
+    cases : tuple[TacticBranch]
         List of tactics applied to each case of the datatype.
-    cases_map : Dict[str, TacticBranchCase]
+    cases_map : dict[str, TacticBranchCase]
         Mapping from constructor name to corresponding tactic.
     default_tac : Tactic
         Tactic for the default case.
@@ -1076,7 +1202,7 @@ class Induction(Tactic):
         self.cases = tuple(cases)
 
         # Form cases_map and default_tac
-        self.cases_map: Dict[str, TacticBranchCase] = dict()
+        self.cases_map: dict[str, TacticBranchCase] = dict()
         self.default_tac: Tactic = Skip()
         for case in self.cases:
             if isinstance(case, TacticBranchCase):
@@ -1097,16 +1223,13 @@ class Induction(Tactic):
         return "Induction(%s, [%s])" % (
             self.param, ", ".join(str(case) for case in self.cases))
 
-    def exec(self, thy: os_theory.OSTheory, state: AbstractProofState) -> AbstractProofState:
-        if not isinstance(state, ProofState):
-            raise TacticException("induction: not applied to singleton")
-
+    def exec(self, thy: OSTheory, state: ProofState) -> AbstractProofState:
         # Type of the induction variable
         var_name = self.param.induct_var
         if var_name not in state.fixes_map:
             raise AssertionError("induction: induction variable %s not found" % var_name)
 
-        var_type = os_theory.expand_type(thy, state.fixes_map[var_name])
+        var_type = state.fixes_map[var_name]
 
         if not (isinstance(var_type, os_struct.OSHLevelType) and var_type.name in thy.datatypes):
             raise AssertionError("induction: variable %s has type %s is not datatype" % (var_name, var_type))
@@ -1132,7 +1255,7 @@ class Induction(Tactic):
                 if fix.name != var_name:
                     fixes.append(fix)
 
-            arg_list: List[OSVar] = list()
+            arg_list: list[OSVar] = list()
             if constr_name in self.cases_map:
                 # Use parameter names provided in cases
                 case = self.cases_map[constr_name]
@@ -1150,23 +1273,24 @@ class Induction(Tactic):
             # For each existing assumption, make the corresponding assumption
             # by substitution
             assumes = []
-            for name, assume in state.assumes:
+            for assume in state.assumes:
                 inst = dict()
                 inst[var_name] = os_term.OSFun(branch.constr_name, *arg_list, type=var_type)
-                assumes.append((name, assume.subst(inst)))
+                assumes.append(Assumes(assume.prop.subst(inst), generation=assume.generation,
+                                       conds=assume.conds, name=assume.name))
 
             # For each argument with the same type, make the corresponding
             # inductive hypothesis
             for arg in arg_list:
-                if os_theory.equal_type(thy, arg.type.subst(type_inst), var_type):
+                if arg.type.subst(type_inst) == var_type:
                     inst = dict()
                     inst[var_name] = OSVar(arg.name, type=arg.type.subst(type_inst))
                     ind_assumes = list()
-                    for name, assume in state.assumes:
-                        if assume.has_var(var_name) or \
-                            any(assume.has_var(arbitrary) for arbitrary in self.param.arbitraries):
-                            ind_assumes.append(assume)
-                    ind_prop = os_term.list_implies(ind_assumes, state.concl).subst(inst)
+                    for assume in state.assumes:
+                        if assume.prop.has_var(var_name) or \
+                            any(assume.prop.has_var(arbitrary) for arbitrary in self.param.arbitraries):
+                            ind_assumes.append(assume.prop)
+                    ind_prop = os_term.list_implies(ind_assumes, state.concl.prop).subst(inst)
                     decls = list()
                     for arbitrary in reversed(self.param.arbitraries):
                         if arbitrary not in state.fixes_map:
@@ -1174,18 +1298,20 @@ class Induction(Tactic):
                         decls.append(OSVar(arbitrary, type=state.fixes_map[arbitrary]))
                     if decls:
                         ind_prop = os_term.OSQuant("forall", decls, ind_prop)
-                    assumes.append(("IH_" + arg.name, ind_prop))
+                    assumes.append(Assumes(ind_prop, generation=0, conds=tuple(), name="IH_" + arg.name))
 
             # Form the goal
             inst = dict()
             inst[var_name] = os_term.OSFun(branch.constr_name, *arg_list, type=var_type)
-            concl = state.concl.subst(inst)
+            concl = Shows(state.concl.prop.subst(inst))
 
             state2 = ProofState(
                 type_params=state.type_params,
                 fixes=fixes,
                 assumes=assumes,
-                concl=concl)
+                concl=concl,
+                graph=state.graph
+            )
             
             if constr_name in self.cases_map:
                 tactic = self.cases_map[constr_name].tactic
@@ -1196,7 +1322,23 @@ class Induction(Tactic):
         return CaseProofState(new_cases)
 
 
-def init_proof_state(query: os_query.Query, n: int) -> ProofState:
+class InductionFunc(Tactic):
+    """Perform induction on a function."""
+    def __init__(self, func_name: str):
+        self.func_name = func_name
+
+    def __str__(self):
+        return "induction_func(%s)" % self.func_name
+    
+    def exec(self, thy: OSTheory, state: AbstractProofState) -> AbstractProofState:
+        if not isinstance(state, ProofState):
+            raise TacticException("induction: not applied to singleton")
+        
+        print(state)
+        raise AssertionError
+
+
+def init_proof_state(thy: OSTheory, query: os_query.Query, n: int) -> ProofState:
     """Initialize proof state from the given query.
     
     Parameters
@@ -1215,11 +1357,14 @@ def init_proof_state(query: os_query.Query, n: int) -> ProofState:
     return ProofState(
         type_params=query.type_params,
         fixes=query.fixes,
-        assumes=[(assume.name, assume.prop) for assume in query.assumes],
-        concl=query.shows[n].prop
+        assumes=[Assumes(assume.prop, name=assume.name, generation=0, conds=tuple(),
+                         meta=os_query.Meta(initial_form=assume.prop))
+                 for assume in query.assumes],
+        concl=query.shows[n],
+        graph=None
     )
 
-def check_proof(thy: os_theory.OSTheory, query: os_query.Query):
+def check_proof(thy: OSTheory, query: os_query.Query):
     """Check proof of each goal in the query.
     
     Parameters
@@ -1231,7 +1376,7 @@ def check_proof(thy: os_theory.OSTheory, query: os_query.Query):
 
     """
     for i, show in enumerate(query.shows):
-        state = init_proof_state(query, i)
+        state = init_proof_state(thy, query, i)
         proof: Tactic = show.proof
         state = proof.exec(thy, state)
         if state.num_unsolved() != 0:

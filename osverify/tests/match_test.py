@@ -11,18 +11,23 @@ class OSMatchTest(unittest.TestCase):
     def testMatch(self):
         thy = basic_thy
         ctxt = os_parser.parse_context(
-            thy, "context { type S; type T; fixes x : S; fixes xs : List<S> }"
+            thy, """context {
+                type S;
+                type T;
+                fixes x : S;
+                fixes y : Option<S>
+            }"""
         )
 
         # Each test case is in the form (pat, t, res), where pat is the pattern
         # to be matched and t is the concrete term, res is the expected return
         # value (whether match is successful).
         test_data = [
-            ("?x::?S", "x", True),
-            ("?x::S", "x", True),
-            ("?x::T", "x", False),
-            ("nil::List<?S>", "nil::List<S>", True),
-            ("cons(?x::?S, ?xs)", "cons(x, xs)", True),
+            ("?x@?S", "x", True),
+            ("?x@S", "x", True),
+            ("?x@T", "x", False),
+            ("none@Option<?S>", "none@Option<S>", True),
+            ("some(?x@?S)", "some(x)", True),
         ]
 
         for s, s2, res in test_data:
@@ -30,10 +35,10 @@ class OSMatchTest(unittest.TestCase):
             t2 = os_parser.parse_term(thy, ctxt, s2)
             tyinst, inst = dict(), dict()
             if res:
-                self.assertTrue(os_match.match(thy, t, t2, tyinst, inst))
+                self.assertTrue(os_match.match(t, t2, tyinst, inst))
                 self.assertEqual(t.subst_type(tyinst).subst(inst), t2)
             else:
-                self.assertFalse(os_match.match(thy, t, t2, tyinst, inst))
+                self.assertFalse(os_match.match(t, t2, tyinst, inst))
 
 
 if __name__ == "__main__":

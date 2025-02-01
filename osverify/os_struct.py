@@ -3,11 +3,20 @@ Definition of structures
 """
 
 
-from typing import Dict, Iterable, List, Set, Tuple, TypeGuard
+from typing import Iterable, TypeGuard
 
 class OSType:
     """Base class of types used in OS verification."""
-    def subst(self, tyinst: Dict[str, "OSType"]) -> "OSType":
+    def print_incr(self, res: list[str], indent: int):
+        """Incrementally print the term."""
+        raise NotImplementedError(f"print_incr on {type(self)}")
+
+    def __str__(self):
+        res: list[str] = []
+        self.print_incr(res, 0)
+        return ''.join(res)
+        
+    def subst(self, tyinst: dict[str, "OSType"]) -> "OSType":
         """Substitute using the given instantiation of type variables.
         
         Both usual type variables (not starting with '?') and schematic
@@ -17,7 +26,7 @@ class OSType:
 
         Parameters
         ----------
-        tyinst : Dict[str, OSType]
+        tyinst : dict[str, OSType]
             instantiations for type variables.
 
         Returns
@@ -26,9 +35,9 @@ class OSType:
             result after substitution of type variables.
 
         """
-        raise NotImplementedError
+        raise NotImplementedError(f"subst on {type(self)}")
     
-    def match(self, other: "OSType", tyinst: Dict[str, "OSType"]) -> bool:
+    def match(self, other: "OSType", tyinst: dict[str, "OSType"]) -> bool:
         """Match the current type with given type, update tyinst.
 
         Only schematic type variables may be matched. If matching on ordinary
@@ -39,7 +48,7 @@ class OSType:
         ----------
         other : OSType
             concrete type to be matched
-        tyinst : Dict[str, OSType]
+        tyinst : dict[str, OSType]
             instantiation of schematic type variables, updated during matching
 
         Returns
@@ -48,17 +57,17 @@ class OSType:
             whether the matching is successful.
         
         """
-        raise NotImplementedError
+        raise NotImplementedError(f"match on {type(self)}")
     
-    def get_vars_inplace(self, vars: List[str]):
+    def get_vars_inplace(self, vars: list[str]):
         """Add set of type variables into vars.
         
         Override this function to implement for new subclasses of OSType.
         
         """
-        raise NotImplementedError
+        raise NotImplementedError(f"get_vars_inplace on {type(self)}")
     
-    def get_vars(self) -> Tuple[str]:
+    def get_vars(self) -> tuple[str]:
         """Obtain the set of type variables."""
         vars = list()
         self.get_vars_inplace(vars)
@@ -76,8 +85,10 @@ class OSType:
         return self.subst(tyinst)
 
 
-prim_types: List[str] = [
-    "bool", "int", "int8u", "int16u", "int32u"
+prim_types: list[str] = [
+    "bool", "int",
+    "int8u", "int16u", "int32u", "int64u",
+    "int8", "int16", "int32", "int64"
 ]
 
 class OSPrimType(OSType):
@@ -89,8 +100,8 @@ class OSPrimType(OSType):
     def __eq__(self, other):
         return isinstance(other, OSPrimType) and self.name == other.name
 
-    def __str__(self):
-        return self.name
+    def print_incr(self, res: list[str], indent: int):
+        res.append(self.name)
     
     def __repr__(self):
         return "OSPrimType(%s)" % self.name
@@ -98,42 +109,14 @@ class OSPrimType(OSType):
     def __hash__(self):
         return hash(("OSPrimType", self.name))
     
-    def subst(self, tyinst: Dict[str, OSType]) -> OSType:
+    def subst(self, tyinst: dict[str, OSType]) -> OSType:
         return self
     
-    def match(self, other: OSType, tyinst: Dict[str, OSType]) -> bool:
+    def match(self, other: OSType, tyinst: dict[str, OSType]) -> bool:
         return self == other
     
-    def get_vars_inplace(self, vars: List[str]):
+    def get_vars_inplace(self, vars: list[str]):
         pass
-
-class OSArrayType(OSType):
-    """Array types"""
-    def __init__(self, base_type: OSType):
-        self.base_type = base_type
-
-    def __eq__(self, other):
-        return isinstance(other, OSArrayType) and self.base_type == other.base_type
-    
-    def __str__(self):
-        return str(self.base_type) + "[]"
-    
-    def __repr__(self):
-        return "OSArrayType(%s)" % repr(self.base_type)
-
-    def __hash__(self):
-        return hash(("OSArrayType", self.base_type))
-
-    def subst(self, tyinst: Dict[str, OSType]) -> OSType:
-        return OSArrayType(self.base_type.subst(tyinst))
-
-    def match(self, other: OSType, tyinst: Dict[str, OSType]) -> bool:
-        if not isinstance(other, OSArrayType):
-            return False
-        return self.base_type.match(other.base_type, tyinst)
-
-    def get_vars_inplace(self, vars: List[str]):
-        self.base_type.get_vars_inplace(vars)
 
 class OSStructType(OSType):
     """Structure types."""
@@ -143,8 +126,8 @@ class OSStructType(OSType):
     def __eq__(self, other):
         return isinstance(other, OSStructType) and self.name == other.name
 
-    def __str__(self):
-        return self.name
+    def print_incr(self, res: list[str], indent: int):
+        res.append(self.name)
     
     def __repr__(self):
         return "OSStructType(%s)" % self.name
@@ -152,13 +135,13 @@ class OSStructType(OSType):
     def __hash__(self):
         return hash(("OSStructType", self.name))
 
-    def subst(self, tyinst: Dict[str, OSType]) -> OSType:
+    def subst(self, tyinst: dict[str, OSType]) -> OSType:
         return self
 
-    def match(self, other: OSType, tyinst: Dict[str, OSType]) -> bool:
+    def match(self, other: OSType, tyinst: dict[str, OSType]) -> bool:
         return self == other
 
-    def get_vars_inplace(self, vars: List[str]):
+    def get_vars_inplace(self, vars: list[str]):
         pass
 
 class OSHLevelType(OSType):
@@ -177,11 +160,15 @@ class OSHLevelType(OSType):
         return isinstance(other, OSHLevelType) and self.name == other.name and \
             self.params == other.params
 
-    def __str__(self):
-        if len(self.params) == 0:
-            return self.name
-        else:
-            return "%s<%s>" % (self.name, ", ".join(str(param) for param in self.params))
+    def print_incr(self, res: list[str], indent: int):
+        res.append(self.name)
+        if self.params:
+            res.append("<")
+            for i, param in enumerate(self.params):
+                if i > 0:
+                    res.append(", ")
+                param.print_incr(res, indent)
+            res.append(">")
         
     def __repr__(self):
         if self.params:
@@ -192,10 +179,10 @@ class OSHLevelType(OSType):
     def __hash__(self):
         return hash(("OSHLevelType", self.name, self.params))
 
-    def subst(self, tyinst: Dict[str, OSType]) -> OSType:
+    def subst(self, tyinst: dict[str, OSType]) -> OSType:
         return OSHLevelType(self.name, *(param.subst(tyinst) for param in self.params))
     
-    def match(self, other: OSType, tyinst: Dict[str, OSType]) -> bool:
+    def match(self, other: OSType, tyinst: dict[str, OSType]) -> bool:
         if not isinstance(other, OSHLevelType):
             return False
         if self.name != other.name:
@@ -205,7 +192,7 @@ class OSHLevelType(OSType):
                 return False
         return True
 
-    def get_vars_inplace(self, vars: List[str]):
+    def get_vars_inplace(self, vars: list[str]):
         for param in self.params:
             param.get_vars_inplace(vars)
 
@@ -217,8 +204,8 @@ class OSBoundType(OSType):
     def __eq__(self, other):
         return isinstance(other, OSBoundType) and self.name == other.name
     
-    def __str__(self):
-        return self.name
+    def print_incr(self, res: list[str], indent: int):
+        res.append(self.name)
     
     def __repr__(self):
         return "OSBoundType(%s)" % self.name
@@ -226,13 +213,13 @@ class OSBoundType(OSType):
     def __hash__(self):
         return hash(("OSBoundType", self.name))
 
-    def subst(self, tyinst: Dict[str, OSType]) -> OSType:
+    def subst(self, tyinst: dict[str, OSType]) -> OSType:
         if self.name in tyinst:
             return tyinst[self.name]
         else:
             return self
 
-    def match(self, other: OSType, tyinst: Dict[str, OSType]) -> bool:
+    def match(self, other: OSType, tyinst: dict[str, OSType]) -> bool:
         # Note matching is performed only for schematic type variables
         if not self.name.startswith('?'):
             return self == other
@@ -242,7 +229,7 @@ class OSBoundType(OSType):
             tyinst[self.name] = other
             return True
 
-    def get_vars_inplace(self, vars: List[str]):
+    def get_vars_inplace(self, vars: list[str]):
         if self.name not in vars:
             vars.append(self.name)
 
@@ -261,8 +248,11 @@ class OSFunctionType(OSType):
         return isinstance(other, OSFunctionType) and self.arg_types == other.arg_types and \
             self.ret_type == other.ret_type
 
-    def __str__(self):
-        return "%s -> %s" % (' -> '.join(str(arg_type) for arg_type in self.arg_types), self.ret_type)
+    def print_incr(self, res: list[str], indent: str):
+        for arg_type in self.arg_types:
+            arg_type.print_incr(res, indent)
+            res.append(" -> ")
+        self.ret_type.print_incr(res, indent)
 
     def __repr__(self):
         return "OSFunctionType(%s)" % ", ".join(repr(ty) for ty in self.arg_types + (self.ret_type,))
@@ -270,10 +260,10 @@ class OSFunctionType(OSType):
     def __hash__(self):
         return hash(("OSFunctionType", self.arg_types, self.ret_type))
 
-    def subst(self, tyinst: Dict[str, OSType]) -> OSType:
+    def subst(self, tyinst: dict[str, OSType]) -> OSType:
         return OSFunctionType(*(arg_type.subst(tyinst) for arg_type in self.arg_types + (self.ret_type.subst(tyinst),)))
 
-    def match(self, other: OSType, tyinst: Dict[str, OSType]) -> bool:
+    def match(self, other: OSType, tyinst: dict[str, OSType]) -> bool:
         if not isinstance(other, OSFunctionType):
             return False
         if len(self.arg_types) != len(other.arg_types):
@@ -283,7 +273,7 @@ class OSFunctionType(OSType):
                 return False
         return self.ret_type.match(other.ret_type, tyinst)
 
-    def get_vars_inplace(self, vars: List[str]):
+    def get_vars_inplace(self, vars: list[str]):
         for arg_type in self.arg_types:
             arg_type.get_vars_inplace(vars)
         self.ret_type.get_vars_inplace(vars)
@@ -294,48 +284,96 @@ Int: OSPrimType = OSPrimType("int")
 Int8U: OSPrimType = OSPrimType("int8u")
 Int16U: OSPrimType = OSPrimType("int16u")
 Int32U: OSPrimType = OSPrimType("int32u")
-BvMap: Dict[int, OSPrimType] = {8: Int8U, 16: Int16U, 32: Int32U}
+Int64U: OSPrimType = OSPrimType("int64u")
+Int8: OSPrimType = OSPrimType("int8")
+Int16: OSPrimType = OSPrimType("int16")
+Int32: OSPrimType = OSPrimType("int32")
+Int64: OSPrimType = OSPrimType("int64")
+BvMap: dict[int, OSPrimType] = {8: Int8U, 16: Int16U, 32: Int32U, 64: Int64U}
+SignedBvMap: dict[int, OSPrimType] = {8: Int8, 16: Int16, 32: Int32, 64: Int64}
 
 def MapType(K: OSType, V: OSType) -> OSType:
     return OSHLevelType("Map", K, V)
 
-def isMapType(ty: OSType) -> TypeGuard[OSHLevelType]:
+def is_map_type(ty: OSType) -> TypeGuard[OSHLevelType]:
     return isinstance(ty, OSHLevelType) and ty.name == "Map"
 
-def destMapType(ty: OSType) -> Tuple[OSType, OSType]:
+def dest_map_type(ty: OSType) -> tuple[OSType, OSType]:
     if not isinstance(ty, OSHLevelType) or ty.name != "Map":
         raise AssertionError("destMap")
     return ty.params[0], ty.params[1]
 
-def isListType(ty: OSType) -> TypeGuard[OSHLevelType]:
-    return isinstance(ty, OSHLevelType) and ty.name == "List"
+def SeqType(T: OSType) -> OSType:
+    """Construct type Seq<T> from T."""
+    return OSHLevelType("Seq", T)
 
-def is_bv_type(type: OSType) -> bool:
+def is_seq_type(T: OSType) -> TypeGuard[OSHLevelType]:
+    """Test whether type has form Seq<T>."""
+    return isinstance(T, OSHLevelType) and T.name == "Seq"
+
+def is_bv_type(type: OSType) -> TypeGuard[OSPrimType]:
     """Return whether the given type is a bitvector type."""
-    return type == Int8U or type == Int16U or type == Int32U
+    return type in (
+        Int8U, Int16U, Int32U, Int64U,
+        Int8, Int16, Int32, Int64
+    )
 
-def get_bv_type(size: int) -> OSType:
+def is_unsigned_bv_type(type: OSType) -> TypeGuard[OSPrimType]:
+    """Return whether the given type is an unsigned bitvector type."""
+    return type in (
+        Int8U, Int16U, Int32U, Int64U
+    )
+
+def is_signed_bv_type(type: OSType) -> TypeGuard[OSPrimType]:
+    """Return whether the given type is a signed bitvector type."""
+    return type in (
+        Int8, Int16, Int32, Int64
+    )
+
+def get_bv_type(size: int) -> OSPrimType:
     """Return the bit-vector type according to its size."""
     if size in BvMap:
         return BvMap[size]
     else:
         raise AssertionError("get_bv_type: unknown size %s" % size)
-    
+
+def get_signed_bv_type(size: int) -> OSPrimType:
+    """Return the signed bit-vector type according to its size."""
+    if size in SignedBvMap:
+        return SignedBvMap[size]
+    else:
+        raise AssertionError("get_signed_bv_type: unknown size %s" % size)
+
 def is_num_type(type: OSType) -> bool:
     """Return whether the given type is a numeric type."""
-    return is_bv_type or type == Nat or type == Int
+    return is_bv_type(type) or type == Nat or type == Int
 
 class StructField:
-    """Each field in the structure consists of field name and
-    field type.
+    """Describes a single field in the structure.
+
+    Possible annotations for a structure field are:
+    - "binary", "octal", "hex": specifies how the field is printed.
+     
+    Attributes
+    ----------
+    type: OSType
+        type of the field
+    field_name: str
+        name of the field
+    annotations: tuple[str]
+        list of annotations
     
     """
-    def __init__(self, type: OSType, field_name: str):
+    def __init__(self, type: OSType, field_name: str, annotations: Iterable[str] = tuple()):
         self.type = type
         self.field_name = field_name
+        self.annotations = tuple(annotations)
 
     def __str__(self):
-        return str(self.type) + " " + self.field_name
+        res = str(self.type) + " " + self.field_name
+        if self.annotations:
+            res += " [" + ", ".join(self.annotations) + "]"
+        return res
 
 class Struct:
     """A structure maintains a list of structure fields.
@@ -344,9 +382,9 @@ class Struct:
     ----------
     struct_name : str
         name of the structure
-    fields : Tuple[StructField]
+    fields : tuple[StructField]
         list of fields
-    field_map : Dict[str, OSType]
+    field_map : dict[str, OSType]
         mapping from field name to their type. Note this should not be used
         to obtain types of actual terms, as they need to be instantiated.
         Use get_field_type function instead.
@@ -357,7 +395,7 @@ class Struct:
         self.fields = tuple(fields)
 
         # Mapping from field name to field type
-        self.field_map: Dict[str, OSType] = dict()
+        self.field_map: dict[str, OSType] = dict()
         for field in self.fields:
             if field.field_name in self.field_map:
                 raise AssertionError("Struct: field %s already appeared" % field.field_name)
@@ -378,17 +416,6 @@ class ConstDef:
     def __str__(self):
         return self.const_name + " = " + str(self.val)
 
-class ConstDefList:
-    """List of constant definitions."""
-    def __init__(self, const_defs: Iterable[ConstDef]):
-        self.const_defs = const_defs
-
-    def __str__(self):
-        res = "consts {\n"
-        res += ";\n".join("  " + str(const_def) for const_def in self.const_defs)
-        res += "\n}"
-        return res
-
 class TypeDef:
     """Type definition."""
     def __init__(self, type_name: str, type: OSType):
@@ -405,7 +432,7 @@ class AxiomDef:
     ----------
     func_name : str
         name of the function
-    type_params : Tuple[str]
+    type_params : tuple[str]
         ordered list of type parameters
     type : OSType
         type of the function
@@ -417,7 +444,10 @@ class AxiomDef:
         self.type = type
 
     def __str__(self):
-        return "axiomdef %s" % self.func_name
+        ty_params = ""
+        if len(self.type_params) > 0:
+            ty_params = "<" + ', '.join(str(param) for param in self.type_params) + ">"
+        return f"axiomdef {self.func_name}{ty_params}: {self.type}"
 
 class AxiomType:
     """Axiomatic type definition.
@@ -426,11 +456,11 @@ class AxiomType:
     ----------
     name : str
         name of the axiomatic type
-    params : Tuple[str]
+    params : tuple[str]
         list of parameters of the axiomatic type.
 
     """
-    def __init__(self, name: str, params: Tuple[str]):
+    def __init__(self, name: str, params: tuple[str]):
         self.name = name
         self.params = params
     
@@ -447,11 +477,11 @@ class DatatypeBranch:
     ----------
     constr_name : str
         name of the constructor of the branch
-    params : Tuple[Tuple[str, OSType]]
+    params : tuple[tuple[str, OSType]]
         list of parameters of the constructor, in name-type pairs.
 
     """
-    def __init__(self, constr_name: str, *params: Tuple[str, OSType]):
+    def __init__(self, constr_name: str, *params: tuple[str, OSType]):
         self.constr_name = constr_name
         self.params = tuple(params)
 
@@ -468,16 +498,16 @@ class Datatype:
     ----------
     name : str
         name of the datatype
-    params : Tuple[str]
+    params : tuple[str]
         list of parameters to the datatype. These can be used as bound types
         in the types of fields in various branches.
-    branches : Tuple[DatatypeBranch]
+    branches : tuple[DatatypeBranch]
         list of branches of the datatype.
-    field_map : Dict[str, OSType]
+    field_map : dict[str, OSType]
         mapping from field names to their type. Note this should NOT be used to
         obtain types of concrete terms, as they need to be instantiated. Use
         get_field_map function instead.
-    branch_map : Dict[str, DatatypeBranch]
+    branch_map : dict[str, DatatypeBranch]
         mapping from branch names to corresponding branches.
 
     """
@@ -489,7 +519,7 @@ class Datatype:
             raise AssertionError("Datatype: must have at least one branch")
         
         # Mapping from field name to field type
-        self.field_map: Dict[str, OSType] = dict()
+        self.field_map: dict[str, OSType] = dict()
         for branch in self.branches:
             for param_name, param_type in branch.params:
                 if param_name in self.field_map:
@@ -499,7 +529,7 @@ class Datatype:
                     self.field_map[param_name] = param_type
 
         # Mapping from branch name to branches
-        self.branch_map: Dict[str, DatatypeBranch] = dict()
+        self.branch_map: dict[str, DatatypeBranch] = dict()
         for branch in self.branches:
             self.branch_map[branch.constr_name] = branch
 

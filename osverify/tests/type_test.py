@@ -1,18 +1,16 @@
 """Unit test for types."""
 
-from typing import Dict
 import unittest
 
 from osverify.os_struct import OSType
 from osverify import os_parser
-from osverify import os_theory
 
 
-core_thy = os_parser.load_theory("core", verbose=False)
+basic_thy = os_parser.load_theory("basic", verbose=False)
 
 class OSTypeTest(unittest.TestCase):
     def testMakeSchematic(self):
-        thy = core_thy
+        thy = basic_thy
         ctxt = os_parser.parse_context(
             thy, "context { type S; type T }"
         )
@@ -20,7 +18,7 @@ class OSTypeTest(unittest.TestCase):
         # In the following tests, replace T by schematic type variables
         test_data = [
             ("T", "?T"),
-            ("List<T>", "List<?T>"),
+            ("Seq<T>", "Seq<?T>"),
             ("Prod<S, T>", "Prod<S, ?T>"),
         ]
 
@@ -30,7 +28,7 @@ class OSTypeTest(unittest.TestCase):
             self.assertEqual(ty.make_schematic({'T'}), res)
 
     def testTypeMatch(self):
-        thy = core_thy
+        thy = basic_thy
         ctxt = os_parser.parse_context(
             thy, "context { type S; type T }"
         )
@@ -51,12 +49,24 @@ class OSTypeTest(unittest.TestCase):
         for s, s2, res in test_data:
             ty = os_parser.parse_type(thy, ctxt, s)
             ty2 = os_parser.parse_type(thy, ctxt, s2)
-            tyinst: Dict[str, OSType] = dict()
+            tyinst: dict[str, OSType] = dict()
             if res:
                 self.assertTrue(ty.match(ty2, tyinst))
                 self.assertEqual(ty.subst(tyinst), ty2)
             else:
                 self.assertFalse(ty.match(ty2, tyinst))
+    def testFunctionType(self):
+        thy = basic_thy
+        ctxt = os_parser.parse_context(
+            thy, "context { type S; type T }"
+        )
+        test_data = [
+            ("S->S->T", "S->S->T")
+        ]
+        for s, s2 in test_data:
+            ty = os_parser.parse_type(thy, ctxt, s)
+            ty2 = os_parser.parse_type(thy, ctxt, s2)
+            self.assertEqual(ty, ty2)
 
 
 if __name__ == "__main__":
